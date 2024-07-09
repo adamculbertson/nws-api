@@ -348,15 +348,27 @@ class Forecast:
                         additional = ""
                     mode = "spotter-activation"
 
+                elif lower.startswith("general storm motion of the day:"):
+                    mode = "storm-motion"
+
                 elif line.startswith("$$"):
                     # Indicates the end of the HWO for the given location, so stop parsing the lines
+                    if mode == "storm-motion":
+                        hwo['motion'] = buffer.strip()
+                    break
+
+                elif line.startswith("&&"):
+                    # Indicates the end of the HWO for the given location, so stop parsing the lines
+                    if mode == "storm-motion":
+                        hwo['motion'] = buffer.strip()
                     break
 
                 elif mode == "county" or mode == "affected-areas" or mode == "spotter-activation":
                     buffer += line + " "
 
-                elif mode == "day-one" or mode == "days-two-seven":
+                elif mode == "day-one" or mode == "days-two-seven" or mode == "storm-motion":
                     buffer += line + "\n"
+
             if hwo:
                 data.append(hwo)
 
