@@ -27,16 +27,16 @@ if __name__ == "__main__":
         config.set_log_level(args.logging_level)
 
     cfg = config.load(file_path=args.config_file)
-    # Check that one or more locations were specified in the config file and exit if not
-    if "locations" not in cfg:
-        sys.stderr.write("No location specified in the config file\n")
-        sys.exit(1)
-
-    if len(cfg['locations']) < 1:
-        sys.stderr.write("No location specified in the config file\n")
-        sys.exit(1)
-
     if args.no_server:
+        # Check that one or more locations were specified in the config file and exit if not
+        if "locations" not in cfg:
+            sys.stderr.write("No location specified in the config file\n")
+            sys.exit(1)
+
+        if len(cfg['locations']) < 1:
+            sys.stderr.write("No location specified in the config file\n")
+            sys.exit(1)
+
         forecasts = []
         for location in cfg['locations']:
             forecast = Forecast(cfg)

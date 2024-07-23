@@ -26,7 +26,10 @@ Steps for retrieving forecast information
 
 
 class Forecast:
-    def __init__(self, config: dict):
+    def __init__(self, config: dict = None):
+        if config is None:
+            config = {}
+
         self.config = config
         self.lat_lon = ()  # Provided coordinates
         self.city_lat_lon = ()  # Coordinates of the city and state for the provided ones
