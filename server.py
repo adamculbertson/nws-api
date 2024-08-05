@@ -54,7 +54,7 @@ def get_location_info(lat_lon: tuple) -> bool:
 
     logging.debug(f"Calling get_location_info(lat_lon: {lat_lon})")
     lat, lon = lat_lon
-    fc = forecast.Forecast({})
+    fc = forecast.Forecast()
     # Lookup point information
     if fc.get_point(lat_lon=lat_lon) < 0:
         return False
