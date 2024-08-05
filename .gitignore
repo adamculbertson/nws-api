@@ -1,5 +1,6 @@
 .idea
 config.json
 forecast.json
+forecast.yml
 __pycache__
 venv

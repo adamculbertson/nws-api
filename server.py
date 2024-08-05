@@ -206,7 +206,7 @@ def parse_payload(payload: dict) -> tuple | int | None:
                 result = get_location_info((payload_lat, payload_lon))
                 if result < 0:
                     return -1  # Returns a 400 error
-                location = coordinates[payload_lat][payload_lon]
+                location = locations[payload['state']][payload['city']]
 
         city = payload['city']
         state = payload['state']
@@ -242,32 +242,61 @@ def parse_payload(payload: dict) -> tuple | int | None:
     return x, y, city, state
 
 
+class Server(http.server.HTTPServer):
+    def __init__(self, server_address, handler_class, config):
+        super().__init__(server_address, handler_class)
+        # TODO: Implement browser cache-control
+        self.hashes = {}  # Hashes for browser cache-control
+        self.config = config
+
+        # Check that the config file has a "server" section and that the API key was specified in it
+        if "server" not in self.config:
+            raise ConfigError("No server configuration options were provided in the configuration file")
+
+        if "key" not in self.config['server']:
+            raise ConfigError("Please provide a key in the 'server' section of the configuration file")
+
+        if not self.config['server']['key']:
+            raise ConfigError("Please provide a key in the 'server' section of the configuration file")
+
+    def reload(self):
+        self.hashes = {}
+
+
 class RequestHandler(http.server.BaseHTTPRequestHandler):
+    server: Server
+
     def log_message(self, format, *args) -> None:
         logging.info("%s - - [%s] %s\n" %
                      (self.address_string(),
                       self.log_date_time_string(),
                       format % args))
 
+    def send_status_code(self, code: int, message: str = None):
+        self.send_response(code)
+        cl = 0  # Content-Length value
+
+        status = json.dumps({"error": 400, "message": message})
+        if message is not None:
+            cl = len(status)
+
+        cl = str(cl)
+        self.send_header("Content-Length", cl)
+        self.end_headers()
+        if message is not None:
+            self.wfile.write(status.encode("utf-8"))
+
     def send_no_content(self):
-        self.send_response(204)
-        self.send_header("Content-Length", "0")
-        self.end_headers()
+        self.send_status_code(204)
 
-    def send_bad_request(self):
-        self.send_response(400)
-        self.send_header("Content-Length", "0")
-        self.end_headers()
+    def send_bad_request(self, message: str = None):
+        self.send_status_code(400, message)
 
-    def send_forbidden(self):
-        self.send_response(403)
-        self.send_header("Content-Length", "0")
-        self.end_headers()
+    def send_forbidden(self, message: str = None):
+        self.send_status_code(403, message)
 
-    def send_not_found(self):
-        self.send_response(404)
-        self.send_header("Content-Length", "0")
-        self.end_headers()
+    def send_not_found(self, message: str = None):
+        self.send_status_code(404, message)
 
     def send_not_modified(self, tag=None):
         self.send_response(304)
@@ -291,28 +320,27 @@ class RequestHandler(http.server.BaseHTTPRequestHandler):
         # If the authorization token was not specified, send a forbidden
         # All API requests require the token
         if auth is None:
-            self.send_forbidden()
+            self.send_forbidden(message="Missing token")
             return
 
         # Check for a properly formatted token
         # The token should be in the format "Bearer token"
         # "token" is the token data
         if not auth.startswith("Bearer"):
-            self.send_bad_request()
+            self.send_bad_request(message="Invalid token format")
             return
 
         # Try to split the token by a space, to get "Bearer" and the token value
         # If the length of the split list is not 2, then it is improperly formatted
         tokens = auth.split(" ")
         if len(tokens) != 2:
-            self.send_bad_request()
+            self.send_bad_request(message="Invalid token format")
             return
 
         # Finally, compare the token to that in the configuration data
         # Instead of sending a forbidden message, send bad request if the token does not match
         if tokens[1] != self.server.config['server']['key']:
-            print("bad token")
-            self.send_bad_request()
+            self.send_bad_request(message="Bad token")
             return
 
         #  Get the payload sent by the client
@@ -320,14 +348,14 @@ class RequestHandler(http.server.BaseHTTPRequestHandler):
 
         # Determine if the payload is of a safe length
         if ln > MAX_LEN:
-            self.send_bad_request()
+            self.send_bad_request(message="Payload too large")
             return
 
         content = self.rfile.read(ln)
         try:
             payload = json.loads(content)
         except json.JSONDecodeError:
-            self.send_bad_request()
+            self.send_bad_request(message="JSON decoding error")
             return
 
         # Parse the path into sections
@@ -344,7 +372,7 @@ class RequestHandler(http.server.BaseHTTPRequestHandler):
 
         # No path was specified, so send an invalid request.
         if len(paths) == 0:
-            self.send_bad_request()
+            self.send_bad_request(message="No path specified")
             return
 
         # Don't bother sending a favicon. Just reply with not found.
@@ -378,7 +406,7 @@ class RequestHandler(http.server.BaseHTTPRequestHandler):
 
         # Any other request is considered invalid.
         else:
-            self.send_bad_request()
+            self.send_bad_request(message="Invalid path")
             return
 
     def do_GET(self):
@@ -398,12 +426,11 @@ class RequestHandler(http.server.BaseHTTPRequestHandler):
         except TypeError:
             # If None, then the location couldn't be found in the cache and it could not be determined
             if result is None:
-                logging.debug("Location not found")
-                self.send_not_found()
+                self.send_not_found(message="Not found. Please try specifying coordinates instead")
                 return None
 
             # Any other value is a bad request
-            self.send_bad_request()
+            self.send_bad_request(message="Invalid parameters")
             return None
 
         office = offices[state][city]
@@ -420,7 +447,7 @@ class RequestHandler(http.server.BaseHTTPRequestHandler):
         except KeyError:
             weather = refresh_weather((x, y), office)
             if weather is None:
-                self.send_bad_request()
+                self.send_bad_request(message=f"Unable to obtain weather information for the coordinates {x}, {y}")
                 return None
 
         # Check if the forecast has been cached recently
@@ -431,31 +458,10 @@ class RequestHandler(http.server.BaseHTTPRequestHandler):
             weather = refresh_weather((x, y), office)
 
             if weather is None:
-                self.send_bad_request()
+                self.send_bad_request(message=f"Unable to obtain weather information for the coordinates {x}, {y}")
                 return None
 
         return weather
-
-
-class Server(http.server.HTTPServer):
-    def __init__(self, server_address, handler_class, config):
-        super().__init__(server_address, handler_class)
-        # TODO: Implement browser cache-control
-        self.hashes = {}  # Hashes for browser cache-control
-        self.config = config
-
-        # Check that the config file has a "server" section and that the API key was specified in it
-        if "server" not in self.config:
-            raise ConfigError("No server configuration options were provided in the configuration file")
-
-        if "key" not in self.config['server']:
-            raise ConfigError("Please provide a key in the 'server' section of the configuration file")
-
-        if not self.config['server']['key']:
-            raise ConfigError("Please provide a key in the 'server' section of the configuration file")
-
-    def reload(self):
-        self.hashes = {}
 
 
 def setup(address, config):
