@@ -3,6 +3,8 @@ import json
 import logging
 import time
 
+from fastapi import FastAPI
+
 import forecast
 from config import ConfigError, load
 
