@@ -1,13 +1,12 @@
 import logging
 import os
+import copy
 
 import yaml
 
-default_config_file = os.path.expanduser("~/.config/forecast.yml")
 manual_logging = False
 
-DEFAULT_ADDRESS = "0.0.0.0"
-DEFAULT_PORT = 8080
+DEFAULT_CONFIG_FILE = os.path.expanduser("~/.config/forecast.yml")
 
 DEFAULTS = {
     "server": {
@@ -30,76 +29,150 @@ DEFAULTS = {
 """
 
 
+# Custom Config class that will return the default value of an option if it is not present in the current configuration
+# The DEFAULTS dictionary is basically read-only with this, as any changes will be added to the current config instead
+# keys(), values(), items(), __cmp__(), __contains__(), and __iter__() will use the combined dictionaries
+class Config(dict):
+    config_path: str
+    __config: dict
+
+    def __init__(self, config_path: str = DEFAULT_CONFIG_FILE, data: dict = None) -> None:
+        super().__init__()
+
+        if data is None:
+            data = {}
+
+        self.config_path = config_path
+        self.__config = data
+
+        if not data:
+            self.load()
+
+    def __repr__(self):
+        return repr(self.__config)
+
+    def __setitem__(self, key, item):
+        self.__config[key] = item
+
+    def __len__(self):
+        return len(self.__config)
+
+    def __delitem__(self, key):
+        del self.__config[key]
+
+    def __getitem__(self, key):
+        # Try to first get the requested item form the configuration dictionary
+        # If not found, ignore the KeyError and try from the defaults dictionary
+        try:
+            return self.__config[key]
+        except KeyError:
+            pass
+
+        # Let this raise the KeyError if it wasn't found
+        return DEFAULTS[key]
+
+    def __contains__(self, item):
+        # Create a full copy of the default dictionary and add the user's config  to the dictionary
+        # Combine the two dictionaries with update()
+        items = copy.deepcopy(DEFAULTS)
+        items.update(self.__config)
+        return item in items
+
+    def __iter__(self):
+        items = copy.deepcopy(DEFAULTS)
+        items.update(self.__config)
+        return iter(items)
+
+    def clear(self):
+        return self.__config.clear()
+
+    def copy(self):
+        return self.__config.copy()
+
+    def update(self, __m, **kwargs):
+        return self.__config.update(__m, **kwargs)
+
+    def keys(self):
+        items = copy.deepcopy(DEFAULTS)
+        items.update(self.__config)
+        return items.keys()
+
+    def values(self):
+        items = copy.deepcopy(DEFAULTS)
+        items.update(self.__config)
+        return items.values()
+
+    def items(self):
+        items = copy.deepcopy(DEFAULTS)
+        items.update(self.__config)
+        return items.items()
+
+    def pop(self, __key):
+        return self.__config.pop(__key)
+
+    def load(self):
+        """
+        Loads the configuration options from the configuration YAML file specified in the config_path.
+        """
+        if self.config_path is not None:
+            with open(self.config_path, "rt") as f:
+                self.__config = yaml.safe_load(f)
+
+        if self.config_path is None and not self.__config:
+            raise ConfigError("No configuration provided. "
+                              "Please add a configuration file or pass the configuration parameters.")
+
+    def save(self):
+        """
+        Saves the configuration options from the config dictionary to the YAML file specified in the config_path.
+        """
+        with open(self.config_path, "wt") as f:
+            # Save only the user's config, not the defaults
+            yaml.dump(self.__config, f)
+
+
 class ConfigError(Exception):
     pass
 
 
-def setup_logging(path: str):
+def setup_file_logging(path: str) -> None:
+    """
+    Sets up logging so that it only logs to the specified file, and not stdout/stderr.
+    :param path: Location of the log file
+    """
     file_handler = logging.FileHandler(path, 'a')
     formatter = logging.Formatter("%(asctime)s - %(levelname)s: %(message)s")
     file_handler.setFormatter(formatter)
 
     log = logging.getLogger()
-    for hdlr in log.handlers[:]:  # Remove the existing file handlers only
-        if isinstance(hdlr, logging.FileHandler):
-            log.removeHandler(hdlr)
+    for handler in log.handlers[:]:  # Remove the existing file handlers only
+        if isinstance(handler, logging.FileHandler):
+            log.removeHandler(handler)
 
     log.addHandler(file_handler)  # Add the new file handler to the list of handlers
 
 
-def set_log_level(level: str):
-    if level.lower() == "debug":
-        level = logging.DEBUG
-    elif level.lower() == "info":
-        level = logging.INFO
-    elif level.lower() == "warning":
-        level = logging.WARNING
-    elif level.lower() == "error":
-        level = logging.ERROR
-    elif level.lower() == "critical":
-        level = logging.CRITICAL
-    else:
-        logging.error(f"Unknown logging level '{level}'. Defaulting to 'INFO'")
-        level = logging.INFO
-
-    logging.getLogger().setLevel(level)
-
-
-def load(file_path: str = default_config_file, data: dict = None) -> dict:
+def set_log_level(level: str) -> None:
     """
-    Load the configuration YAML from the specified config file. If no file was specified, then ~/.config/forecast.yml is
+    Get the log level form the string provided and set the log level.
+    :param level: Log level string, with the possible values: CRITICAL, FATAL, ERROR, WARN/WARNING, INFO, or DEBUG.
+    """
+    level = level.upper()
+    try:
+        logging.getLogger().setLevel(level)
+    except ValueError:
+        logging.getLogger().setLevel("INFO")
+
+
+def load(config_path: str = DEFAULT_CONFIG_FILE, data: dict = None) -> dict:
+    """
+    Load the configuration YAML from the specified config file. If no file was specified, then DEFAULT_CONFIG_FILE is
      used
     :param data: Loads the configuration parameters from the provided dictionary instead of the file.
-    :param file_path: String path to the configuration YAML file
+    :param config_path: String path to the configuration YAML file
     :return: Dictionary of configuration parameters
     """
-    config = DEFAULTS
-    if data is None:
-        if not os.path.exists(file_path):
-            with open(file_path, "wt") as f:
-                yaml.dump(DEFAULTS, f)
-
-        else:
-            with open(file_path, "rt") as f:
-                config = yaml.safe_load(f)
-    else:
-        config = data
-
-    if "server" in config:
-        if "address" not in config['server']:
-            config['server']['address'] = DEFAULT_ADDRESS
-        if config['server']['address'] is None:
-            config['server']['address'] = DEFAULT_ADDRESS
-
-        if "port" not in config['server']:
-            config['server']['port'] = DEFAULT_PORT
-        if config['server']['port'] is None:
-            config['server']['port'] = DEFAULT_PORT
-
-        if "key" not in config['server']:
-            config['server']['key'] = None
-    else:
-        config['server'] = {"address": DEFAULT_ADDRESS, "port": DEFAULT_PORT, "key": None}
+    config = Config(config_path=config_path, data=data)
 
     if "logging" in config:
         # Any logging option in the environment takes precedence over configuration options.
@@ -107,15 +180,15 @@ def load(file_path: str = default_config_file, data: dict = None) -> dict:
         # options
         if not manual_logging:
             if "log_path" in config:
-                setup_logging(config['logging']['log_path'])
+                setup_file_logging(config['logging']['log_path'])
                 logging.debug(f"Using log path {config['logging']['log_path']} from config")
             if "log_level" in config:
-                logging.debug(f"Setting log level to {config['logging']['log_level']} from config")
                 set_log_level(config['logging']['log_level'])
+                logging.debug(f"Setting log level to {config['logging']['log_level']} from config")
 
     if "LOG_PATH" in os.environ and not manual_logging:
         logging.debug(f"Setting log path to {os.environ['LOG_PATH']} from environment")
-        setup_logging(os.environ['LOG_PATH'])
+        setup_file_logging(os.environ['LOG_PATH'])
 
     if "LOG_LEVEL" in os.environ and not manual_logging:
         logging.debug(f"Setting log level to {os.environ['LOG_LEVEL']} from environment")

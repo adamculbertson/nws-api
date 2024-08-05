@@ -1,6 +1,5 @@
 import http.server
 import json
-import hashlib
 import logging
 import time
 
@@ -55,7 +54,7 @@ def get_location_info(lat_lon: tuple) -> bool:
 
     logging.debug(f"Calling get_location_info(lat_lon: {lat_lon})")
     lat, lon = lat_lon
-    fc = forecast.Forecast(cfg)
+    fc = forecast.Forecast({})
     # Lookup point information
     if fc.get_point(lat_lon=lat_lon) < 0:
         return False
@@ -399,6 +398,7 @@ class RequestHandler(http.server.BaseHTTPRequestHandler):
         except TypeError:
             # If None, then the location couldn't be found in the cache and it could not be determined
             if result is None:
+                logging.debug("Location not found")
                 self.send_not_found()
                 return None
 
