@@ -1,6 +1,5 @@
 import http.server
 import json
-import hashlib
 import logging
 import time
 
