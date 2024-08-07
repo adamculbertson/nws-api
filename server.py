@@ -1,5 +1,7 @@
 import logging
 import time
+import uuid
+from enum import Enum
 
 from fastapi import FastAPI, APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
@@ -82,6 +84,17 @@ class DsamePayload(BaseModel):
     length: str
     seconds: int
     MESSAGE: str
+
+
+class TokenType(str, Enum):
+    readOnly = "readOnly"
+    alertOnly = "alertOnly"
+
+
+class Token(BaseModel):
+    name: str | None = None
+    alertOnly: bool | None = None
+    readOnly: bool | None = None
 
 
 def get_location_info(lat_lon: tuple) -> bool:
@@ -395,54 +408,75 @@ class APIv1:
 
         # Routers that require admin permissions
         # These can change server configuration options, so they will have a different token check
-        # TODO: Add/remove read-only tokens, clear the cache, check the cache
+        self.router.add_api_route("/admin/cache", self.admin_get_cache, methods=["GET"],
+                                  dependencies=[Depends(self.check_token_admin)],
+                                  description="View the cached forecast data")
+
+        self.router.add_api_route("/admin/cache/clear", self.admin_clear_cache, methods=["DELETE"],
+                                  dependencies=[Depends(self.check_token_admin)],
+                                  description="Clear ALL of the currently cached forecast data")
+
+        self.router.add_api_route("/admin/token", self.admin_get_tokens, methods=["GET"],
+                                  dependencies=[Depends(self.check_token_admin)],
+                                  description="Get a list of non-admin tokens")
+
+        self.router.add_api_route("/admin/token/delete/{token}", self.admin_delete_token, methods=["DELETE"],
+                                  dependencies=[Depends(self.check_token_admin)],
+                                  description="Delete the specified non-admin token")
+
+        self.router.add_api_route("/admin/token/create/{token_type}", self.admin_create_token, methods=["PUT"],
+                                  dependencies=[Depends(self.check_token_admin)],
+                                  description="Create a read-only or alert-only token")
+
+        self.router.add_api_route("/admin/token/modify/{token}", self.admin_modify_token, methods=["POST"],
+                                  dependencies=[Depends(self.check_token_admin)],
+                                  description="Modify the specified non-admin token")
+
+        self.router.add_api_route("/admin/config/save", self.admin_save_config,
+                                  methods=["POST", "GET", "HEAD", "PATCH"],
+                                  dependencies=[Depends(self.check_token_admin)],
+                                  description="Saves any modified configuration options "
+                                              "(and users) to the configuration file.")
 
         self.app.include_router(self.router, prefix=f"/api/{self.version}/weather")
 
-    def check_token(self, key: str = Depends(oauth2_scheme)) -> None:
-        # This is replaced by the check_token_* functions that check for specific permissions
-        # Protected endpoint example: https://testdriven.io/tips/6840e037-4b8f-4354-a9af-6863fb1c69eb/
-        # Another API key example: https://timberry.dev/posts/fastapi-with-apikeys/
-        if key != self.config['server']['key']:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Forbidden"
-            )
+    # Protected endpoint example: https://testdriven.io/tips/6840e037-4b8f-4354-a9af-6863fb1c69eb/
+    # Another API key example: https://timberry.dev/posts/fastapi-with-apikeys/
 
-    def check_token_admin(self, key: str = Depends(oauth2_scheme)) -> None:
+    def check_token_admin(self, token: str = Depends(oauth2_scheme)) -> None:
         # For endpoints that are only available to administrators
-        if not self.is_admin(key):
+        if not self.is_admin(token):
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Forbidden"
             )
 
-    def check_token_read(self, key: str = Depends(oauth2_scheme)) -> None:
+    def check_token_read(self, token: str = Depends(oauth2_scheme)) -> None:
         # For endpoints that are only available to those with read access
-        if not self.has_read_permissions(key):
+        if not self.has_read_permissions(token):
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Forbidden"
             )
 
-    def check_token_alert(self, key: str = Depends(oauth2_scheme)) -> None:
+    def check_token_alert(self, token: str = Depends(oauth2_scheme)) -> None:
         # For the alert endpoint
-        if not self.has_alert_permissions(key):
+        if not self.has_alert_permissions(token):
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Forbidden"
             )
 
-    def is_admin(self, key: str) -> bool:
-        perms = self.get_token_permissions(key)
+    def is_admin(self, token: str) -> bool:
+        perms = self.get_token_permissions(token)
 
         if perms['admin']:
             return True
 
         return False
 
-    def has_read_permissions(self, key: str) -> bool:
-        perms = self.get_token_permissions(key)
+    def has_read_permissions(self, token: str) -> bool:
+        perms = self.get_token_permissions(token)
 
         # Admin has permission, regardless of what the rest of their permissions state
         if perms['admin']:
@@ -453,8 +487,8 @@ class APIv1:
 
         return False
 
-    def has_alert_permissions(self, key: str) -> bool:
-        perms = self.get_token_permissions(key)
+    def has_alert_permissions(self, token: str) -> bool:
+        perms = self.get_token_permissions(token)
         print(perms)
 
         # Admin has permission, regardless of what the rest of their permissions state
@@ -466,7 +500,7 @@ class APIv1:
 
         return False
 
-    def get_token_permissions(self, key: str) -> dict:
+    def get_token_permissions(self, token: str) -> dict:
         # Start out with a complete denial of permissions
         # Any additional info in the token will also be returned
         # admin: All permissions
@@ -482,7 +516,7 @@ class APIv1:
             return result
 
         for test_user in users:
-            if test_user['token'] == key:
+            if test_user['token'] == token:
                 result['info'] = test_user
                 if "admin" in test_user:
                     result['admin'] = test_user['admin']
@@ -496,6 +530,136 @@ class APIv1:
         return result
 
     # BEGIN API CALLBACKS
+    def admin_get_cache(self) -> dict:
+        # /admin/cache
+        return {"locations": locations, "coordinates": coordinates, "weather_info": weather_info,
+                "offices": offices, "offices_locations": offices_locations}
+
+    def admin_clear_cache(self) -> dict:
+        global locations, coordinates, weather_info, offices, offices_locations
+
+        locations = {}
+        coordinates = {}
+        weather_info = {}
+        offices = {}
+        offices_locations = {}
+
+        return {"success": True}
+
+    def admin_get_tokens(self) -> dict:
+        result = []
+        try:
+            users = self.config['server']['users']
+        except KeyError:
+            # If the keys are not configured for whatever reason, deny all permissions
+            logging.error("The users in the config file are not configured correctly")
+            return {}
+
+        admin_users = 0
+        for user in users:
+            # Don't display admin users
+            # We will count them, however
+            if self.is_admin(user['token']):
+                admin_users += 1
+                continue
+
+            result.append(user)
+
+        return {"admin_users": admin_users, "users": result}
+
+    def admin_delete_token(self, token: str) -> dict:
+        if self.is_admin(token):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Forbidden. Cannot remove admin tokens. Please see the configuration YAML file."
+            )
+
+        try:
+            users = self.config['server']['users']
+        except KeyError:
+            # If the keys are not configured for whatever reason, deny all permissions
+            logging.error("The users in the config file are not configured correctly")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="The users in the config file are not configured correctly"
+            )
+
+        for index, user in enumerate(users):
+            if user['token'] == token:
+                del self.config['server']['users'][index]
+                return {"success": True}
+
+        # If we made it to this point, then the provided token was invalid
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"The token {token} was not found"
+        )
+
+    def admin_create_token(self, token_type: TokenType) -> dict:
+        user = {}
+        if token_type is TokenType.readOnly:
+            user['readOnly'] = True
+        elif token_type is TokenType.alertOnly:
+            user['alertOnly'] = True
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid token type: {token_type.value}"
+            )
+
+        user['token'] = str(uuid.uuid4())
+
+        self.config['server']['users'].append(user)
+
+        return user
+
+    def admin_modify_token(self, token: str, payload: Token) -> dict:
+        if self.is_admin(token):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Forbidden. Cannot remove admin tokens. Please see the configuration YAML file."
+            )
+
+        try:
+            users = self.config['server']['users']
+        except KeyError:
+            # If the keys are not configured for whatever reason, deny all permissions
+            logging.error("The users in the config file are not configured correctly")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="The users in the config file are not configured correctly"
+            )
+        found = None
+        found_index = None
+        for index, user in enumerate(users):
+            if user['token'] == token:
+                found = user
+                found_index = index
+                break
+
+        if found is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"The token {token} was not found"
+            )
+
+        user = users[found_index]
+        if payload.name is not None:
+            user['name'] = payload.name
+
+        if payload.readOnly is not None:
+            user['readOnly'] = payload.readOnly
+
+        if payload.alertOnly is not None:
+            user['alertOnly'] = payload.alertOnly
+
+        self.config['server']['users'][found_index] = user
+        return {"success": True}
+
+    def admin_save_config(self) -> dict:
+        self.config.save()
+        return {"success": True}
+
     def get_all_forecast_info(self, payload: Payload) -> dict:
         # /all
         return get_weather(payload)
@@ -524,6 +688,9 @@ class APIv1:
     def receive_dsame_alert(self, payload: DsamePayload) -> dict:
         # /alert
         # TODO: Implement alerts
+        # The import and logging will be removed once implemented
+        import json
+        logging.debug(f"Received alert: {json.dumps(payload.dict())}")
         return {"alert": "success", "payload": payload.dict()}
 
     # END API CALLBACKS

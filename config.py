@@ -12,7 +12,7 @@ DEFAULTS = {
     "server": {
         "address": "0.0.0.0",  # IP address / hostname to bind to (all by default)
         "port": 8080,  # Port to accept connections on
-        "keys": []  # List of dictionaries containing tokens and their permissions
+        "users": []  # List of dictionaries containing tokens and their permissions
     },
     # Global forecast settings
     # Location can be left blank
