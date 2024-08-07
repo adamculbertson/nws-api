@@ -1,12 +1,12 @@
-import http.server
-import json
 import logging
 import time
 
-from fastapi import FastAPI
+from fastapi import FastAPI, APIRouter, Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer
+from pydantic import BaseModel
 
 import forecast
-from config import ConfigError, load
+from config import Config, ConfigError, load
 
 MAX_LEN = 128  # Maximum allowed length of a JSON POST payload
 CACHE_TIME = 5  # Time to cache the forecast information, in minutes
@@ -22,6 +22,8 @@ CACHE_TIME = 5  # Time to cache the forecast information, in minutes
 # City and State may be the only things provided by the client
 # If the server has not seen this combination before, which means the lat and lon are NOT in the cache, the server
 # will respond with a 404 Not Found error
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
 # TODO: Check if a location is within the grid coordinates of the office. That may allow for less lookups.
 
@@ -45,6 +47,13 @@ offices = {}
 # Office Locations
 # Format: offices_locations[office] = {"city": city, "state": state}
 offices_locations = {}
+
+
+class Payload(BaseModel):
+    lat: float | str | None = None
+    lon: float | str | None = None
+    city: str | None = None
+    state: str | None = None
 
 
 def get_location_info(lat_lon: tuple) -> bool:
@@ -147,7 +156,7 @@ def refresh_weather(gridXY: tuple, office: str) -> dict | None:
     :return: Dictionary containing the hourly and regular forecasts, hazardous weather outlook, and update timestamp.
     """
     logging.debug(f"Calling refresh_weather(gridXY: {gridXY}, office: {office})")
-    fc = forecast.Forecast({})
+    fc = forecast.Forecast()
     hourly = fc.get_forecast_hourly(gridXY=gridXY, office=office)
 
     if hourly is None:
@@ -244,11 +253,75 @@ def parse_payload(payload: dict) -> tuple | int | None:
     return x, y, city, state
 
 
-class Server(http.server.HTTPServer):
-    def __init__(self, server_address, handler_class, config):
-        super().__init__(server_address, handler_class)
-        # TODO: Implement browser cache-control
-        self.hashes = {}  # Hashes for browser cache-control
+def get_weather(payload_model: Payload) -> dict | None:
+    """
+    Fetches the weather from the cache or calls the API to refresh the cache if necessary.
+    :param payload_model: Model from user input that contains the latitude, longitude, city, and state of the request.
+    :return: Dictionary of weather data or None on error.
+    """
+    payload = payload_model.dict()
+    result = None
+    try:
+        result = parse_payload(payload)
+        x, y, city, state = result
+    except TypeError:
+        # If None, then the location couldn't be found in the cache and it could not be determined
+        if result is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Not found. Please try specifying coordinates instead"
+            )
+
+        # Any other value is a bad request
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid parameters"
+        )
+
+    office = offices[state][city]
+    # Determine if the office dictionary exists and create it if not
+    if office not in weather_info:
+        weather_info[office] = {}
+
+    # Determine if the x coordinate dictionary exists and create it if not
+    if x not in weather_info[office]:
+        weather_info[office][x] = {}
+
+    try:
+        weather = weather_info[office][x][y]
+    except KeyError:
+        weather = refresh_weather((x, y), office)
+        if weather is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Unable to obtain weather information for the coordinates {x}, {y}"
+            )
+
+    # Check if the forecast has been cached recently
+    # If it was just crated above, then the below check should fail and not be called
+    now = int(time.time())
+
+    if weather['time'] < now - CACHE_TIME * 60:
+        weather = refresh_weather((x, y), office)
+
+        if weather is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Unable to obtain weather information for the coordinates {x}, {y}"
+            )
+
+    return weather
+
+
+class APIv1:
+    app: FastAPI
+    config: Config
+    router: APIRouter
+    version: str = "v1"
+
+    def __init__(self, app: FastAPI, config: Config):
+        self.app = app
+        self.router = APIRouter()
         self.config = config
 
         # Check that the config file has a "server" section and that the API key was specified in it
@@ -261,216 +334,80 @@ class Server(http.server.HTTPServer):
         if not self.config['server']['key']:
             raise ConfigError("Please provide a key in the 'server' section of the configuration file")
 
-    def reload(self):
-        self.hashes = {}
+        # Define routers for the API
+        # These are standard read-only methods (they can't change anything but add data to the cache)
+        self.router.add_api_route("/all", self.get_all, methods=["POST"], dependencies=[Depends(self.check_token)],
+                                  description="Obtain all available forecast information from the NWS")
+        self.router.add_api_route("/forecast", self.get_forecast, methods=["POST"],
+                                  dependencies=[Depends(self.check_token)],
+                                  description="Obtain only the daily forecast information from the NWS")
+        self.router.add_api_route("/hourly", self.get_hourly, methods=["POST"],
+                                  dependencies=[Depends(self.check_token)],
+                                  description="Obtain only the hourly forecast information from the NWS")
+        self.router.add_api_route("/hwo", self.get_hwo, methods=["POST"], dependencies=[Depends(self.check_token)],
+                                  description="Parse and obtain the Hazardous Weather Outlook from the NWS")
+        self.router.add_api_route("/spotter", self.get_spotter, methods=["POST"],
+                                  dependencies=[Depends(self.check_token)],
+                                  description="Parse the Hazardous Weather Outlook and only obtain the Spotter "
+                                              "Activation Statement")
+        # TODO: Token that can ONLY send alerts
+        self.router.add_api_route("/alert", self.receive_alert, methods=["POST"],
+                                  dependencies=[Depends(self.check_token)], description="Receive an alert from dsame3")
 
+        # Administrative methods
+        # These can change server configuration options, so they will have a different token check
+        # TODO: Add/remove read-only tokens, clear the cache, check the cache
 
-class RequestHandler(http.server.BaseHTTPRequestHandler):
-    server: Server
+        self.app.include_router(self.router, prefix=f"/api/{self.version}")
 
-    def log_message(self, format, *args) -> None:
-        logging.info("%s - - [%s] %s\n" %
-                     (self.address_string(),
-                      self.log_date_time_string(),
-                      format % args))
+    def check_token(self, key: str = Depends(oauth2_scheme)):
+        # Protected endpoint example: https://testdriven.io/tips/6840e037-4b8f-4354-a9af-6863fb1c69eb/
+        # Another API key example: https://timberry.dev/posts/fastapi-with-apikeys/
+        # TODO: Handle multiple keys
+        if key != self.config['server']['key']:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Forbidden"
+            )
 
-    def send_status_code(self, code: int, message: str = None):
-        self.send_response(code)
-        cl = 0  # Content-Length value
+    # BEGIN API CALLBACKS
+    def get_all(self, payload: Payload):
+        # /all
+        return get_weather(payload)
 
-        status = json.dumps({"error": 400, "message": message})
-        if message is not None:
-            cl = len(status)
+    def get_forecast(self, payload: Payload):
+        # /forecast
+        return get_weather(payload)['forecast']
 
-        cl = str(cl)
-        self.send_header("Content-Length", cl)
-        self.end_headers()
-        if message is not None:
-            self.wfile.write(status.encode("utf-8"))
+    def get_hourly(self, payload: Payload):
+        # /hourly
+        return get_weather(payload)['hourly']
 
-    def send_no_content(self):
-        self.send_status_code(204)
+    def get_hwo(self, payload: Payload):
+        # /hwo
+        return get_weather(payload)['hwo']
 
-    def send_bad_request(self, message: str = None):
-        self.send_status_code(400, message)
+    def get_spotter(self, payload: Payload):
+        # /spotter
+        hwo = get_weather(payload)['hwo']
+        spotter = []
+        for item in hwo:
+            spotter.append(item['spotter'])
 
-    def send_forbidden(self, message: str = None):
-        self.send_status_code(403, message)
+        return spotter
 
-    def send_not_found(self, message: str = None):
-        self.send_status_code(404, message)
+    def receive_alert(self, payload: Payload):
+        # /alert
+        # TODO: Implement alerts
+        return {"alert": "success", "payload": payload.dict()}
 
-    def send_not_modified(self, tag=None):
-        self.send_response(304)
-        self.send_header("Content-Length", "0")
-        if tag is not None:
-            self.send_header("ETag", tag)
-        self.end_headers()
-
-    def send_json(self, data, status=200):
-        js = json.dumps(data)
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(js)))
-        self.end_headers()
-        self.wfile.write(js.encode("utf-8"))
-
-    def do_POST(self):
-        # Check for and get the authorization token
-        auth = self.headers.get("Authorization")
-
-        # If the authorization token was not specified, send a forbidden
-        # All API requests require the token
-        if auth is None:
-            self.send_forbidden(message="Missing token")
-            return
-
-        # Check for a properly formatted token
-        # The token should be in the format "Bearer token"
-        # "token" is the token data
-        if not auth.startswith("Bearer"):
-            self.send_bad_request(message="Invalid token format")
-            return
-
-        # Try to split the token by a space, to get "Bearer" and the token value
-        # If the length of the split list is not 2, then it is improperly formatted
-        tokens = auth.split(" ")
-        if len(tokens) != 2:
-            self.send_bad_request(message="Invalid token format")
-            return
-
-        # Finally, compare the token to that in the configuration data
-        # Instead of sending a forbidden message, send bad request if the token does not match
-        if tokens[1] != self.server.config['server']['key']:
-            self.send_bad_request(message="Bad token")
-            return
-
-        #  Get the payload sent by the client
-        ln = int(self.headers.get("Content-Length"))
-
-        # Determine if the payload is of a safe length
-        if ln > MAX_LEN:
-            self.send_bad_request(message="Payload too large")
-            return
-
-        content = self.rfile.read(ln)
-        try:
-            payload = json.loads(content)
-        except json.JSONDecodeError:
-            self.send_bad_request(message="JSON decoding error")
-            return
-
-        # Parse the path into sections
-        # In case we're running behind a reverse proxy, strip out the "api" part of the path.
-        paths = self.path.split("/")
-        paths.pop(0)
-        if paths[0] == "api":
-            paths.pop(0)
-
-        # If the path is /weather remove that
-        if len(paths) > 0:
-            if paths[0] == "weather":
-                paths.pop(0)
-
-        # No path was specified, so send an invalid request.
-        if len(paths) == 0:
-            self.send_bad_request(message="No path specified")
-            return
-
-        # Don't bother sending a favicon. Just reply with not found.
-        elif paths[0] == "favicon.ico":
-            self.send_not_found()
-            return
-
-        elif paths[0] == "all":
-            pass
-            weather = self.get_weather(payload)
-            self.send_json(weather)
-
-        elif paths[0] == "forecast":
-            weather = self.get_weather(payload)
-            self.send_json(weather['forecast'])
-
-        elif paths[0] == "hourly":
-            weather = self.get_weather(payload)
-            self.send_json(weather['hourly'])
-
-        elif paths[0] == "hwo":
-            weather = self.get_weather(payload)
-            self.send_json(weather['hwo'])
-
-        elif paths[0] == "spotter":
-            weather = self.get_weather(payload)
-            spotter = []
-            for item in weather['hwo']:
-                spotter.append(item['spotter'])
-            self.send_json(spotter)
-
-        # Any other request is considered invalid.
-        else:
-            self.send_bad_request(message="Invalid path")
-            return
-
-    def do_GET(self):
-        # All endpoints are POST requests, so all GET requests are invalid
-        self.send_bad_request()
-
-    def get_weather(self, payload: dict) -> dict | None:
-        """
-        Fetches the weather from the cache or calls the API to refresh the cache if necessary.
-        :param payload: Dictionary that contains the latitude, longitude, city, and state of the request.
-        :return: Dictionary of weather data or None on error.
-        """
-        result = None
-        try:
-            result = parse_payload(payload)
-            x, y, city, state = result
-        except TypeError:
-            # If None, then the location couldn't be found in the cache and it could not be determined
-            if result is None:
-                self.send_not_found(message="Not found. Please try specifying coordinates instead")
-                return None
-
-            # Any other value is a bad request
-            self.send_bad_request(message="Invalid parameters")
-            return None
-
-        office = offices[state][city]
-        # Determine if the office dictionary exists and create it if not
-        if office not in weather_info:
-            weather_info[office] = {}
-
-        # Determine if the x coordinate dictionary exists and create it if not
-        if x not in weather_info[office]:
-            weather_info[office][x] = {}
-
-        try:
-            weather = weather_info[office][x][y]
-        except KeyError:
-            weather = refresh_weather((x, y), office)
-            if weather is None:
-                self.send_bad_request(message=f"Unable to obtain weather information for the coordinates {x}, {y}")
-                return None
-
-        # Check if the forecast has been cached recently
-        # If it was just crated above, then the below check should fail and not be called
-        now = int(time.time())
-
-        if weather['time'] < now - CACHE_TIME * 60:
-            weather = refresh_weather((x, y), office)
-
-            if weather is None:
-                self.send_bad_request(message=f"Unable to obtain weather information for the coordinates {x}, {y}")
-                return None
-
-        return weather
-
-
-def setup(address, config):
-    return Server(address, RequestHandler, config)
+    # END API CALLBACKS
 
 
 if __name__ == "__main__":
+    import uvicorn
+
     cfg = load()
-    s = Server((cfg['server']['address'], cfg['server']['port']), RequestHandler, cfg)
-    s.serve_forever()
+    app = FastAPI()
+    api = APIv1(app=app, config=cfg)
+    uvicorn.run(app, host=cfg['server']['address'], port=cfg['server']['port'], log_level=cfg.log_level)

@@ -36,13 +36,14 @@ class Config(dict):
     config_path: str
     __config: dict
 
-    def __init__(self, config_path: str = DEFAULT_CONFIG_FILE, data: dict = None) -> None:
+    def __init__(self, config_path: str = DEFAULT_CONFIG_FILE, data: dict = None, log_level: int = logging.INFO) -> None:
         super().__init__()
 
         if data is None:
             data = {}
 
         self.config_path = config_path
+        self.log_level = log_level
         self.__config = data
 
         if not data:
@@ -164,7 +165,7 @@ def set_log_level(level: str) -> None:
         logging.getLogger().setLevel("INFO")
 
 
-def load(config_path: str = DEFAULT_CONFIG_FILE, data: dict = None) -> dict:
+def load(config_path: str = DEFAULT_CONFIG_FILE, data: dict = None) -> Config:
     """
     Load the configuration YAML from the specified config file. If no file was specified, then DEFAULT_CONFIG_FILE is
      used
@@ -193,5 +194,7 @@ def load(config_path: str = DEFAULT_CONFIG_FILE, data: dict = None) -> dict:
     if "LOG_LEVEL" in os.environ and not manual_logging:
         logging.debug(f"Setting log level to {os.environ['LOG_LEVEL']} from environment")
         set_log_level(os.environ['LOG_LEVEL'])
+
+    config.log_level = logging.getLogger().level
 
     return config

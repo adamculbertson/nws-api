@@ -2,13 +2,17 @@ if __name__ == "__main__":
     import sys
     import argparse
     import config
+
+    from fastapi import FastAPI
+    import uvicorn
+
     from forecast import Forecast
-    from server import Server, RequestHandler
+    from server import APIv1
 
     parser = argparse.ArgumentParser(description="Fetches weather data from the National Weather Service.")
     parser.add_argument("-L", "--logging-level", choices=["debug", "info", "warning", "error", "critical"],
                         help="Set the logging level to the provided value. For the least output, use error or critical.")
-    parser.add_argument("-O", "--log-file", help="Write logs to the specified file instead of to the console.")
+    parser.add_argument("-l", "--log-file", help="Write logs to the specified file instead of to the console.")
     parser.add_argument("-c", "--config-file", action="store", default=config.DEFAULT_CONFIG_FILE,
                         help="Use the specified configuration YAML file instead of the default one.")
     parser.add_argument("--no-server", action="store_true", help="Prints the Hazardous Weather Outlook"
@@ -50,5 +54,7 @@ if __name__ == "__main__":
         with open("forecast.json", "wt") as f:
             json.dump(forecasts, f)
     else:
-        s = Server((cfg['server']['address'], cfg['server']['port']), RequestHandler, cfg)
-        s.serve_forever()
+        app = FastAPI()
+        api = APIv1(app=app, config=cfg)
+        print(cfg.log_level)
+        uvicorn.run(app, host=cfg['server']['address'], port=cfg['server']['port'], log_level=cfg.log_level)
