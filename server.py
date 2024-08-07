@@ -672,13 +672,15 @@ class APIv1:
         # /hourly
         return get_weather(payload)['hourly']
 
-    def get_hazardous_weather_outlook(self, payload: Payload) -> dict:
+    def get_hazardous_weather_outlook(self, payload: Payload) -> list | None:
         # /hwo
         return get_weather(payload)['hwo']
 
-    def get_spotter_activation_statement(self, payload: Payload) -> list:
+    def get_spotter_activation_statement(self, payload: Payload) -> list | None:
         # /spotter
         hwo = get_weather(payload)['hwo']
+        if hwo is None:
+            return None
         spotter = []
         for item in hwo:
             spotter.append(item['spotter'])
