@@ -12,7 +12,7 @@ DEFAULTS = {
     "server": {
         "address": "0.0.0.0",  # IP address / hostname to bind to (all by default)
         "port": 8080,  # Port to accept connections on
-        "key": None  # API key, which must be sent via the Authorization HTTP header
+        "keys": []  # List of dictionaries containing tokens and their permissions
     },
     # Global forecast settings
     # Location can be left blank
@@ -26,6 +26,34 @@ DEFAULTS = {
     "lon": None,
     "office": None # Force the NWS Office to use for the Hazardous Weather Outlook
 }
+
+# Example key item (for an admin):
+{
+    "name": "Admin",
+    "admin": true,
+    "token": "apiTokenHere"
+}
+
+# Example key item (for a read-only user):
+{
+    "name": "Read-Only user",
+    "admin": false,
+    "readOnly": true
+    "token": "apiTokenHere"
+}
+
+# Example key item (for an alert only user):
+{
+    "name": "Alert-only user",
+    "admin": false,
+    "alertOnly": true,
+    "token": "apiTokenHere"
+}
+
+Admin users inherently have ALL permissions.
+Read-only users can request forecast information (due to the nature of sending data, it is odd to consider them 
+  "read-only" since they POST data)
+Alert only users can ONLY send a POST request to the alert endpoint and nothing else.
 """
 
 

@@ -49,11 +49,39 @@ offices = {}
 offices_locations = {}
 
 
+# Client payload structure
+# All items are listed as optional, but a pair must be specified
+# For example: latitude and longitude OR city and state
 class Payload(BaseModel):
     lat: float | str | None = None
     lon: float | str | None = None
     city: str | None = None
     state: str | None = None
+
+
+# dsame3 webhook payload structure
+class DsamePayload(BaseModel):
+    ORG: str
+    EEE: str
+    TTTT: str
+    JJJHHMM: str
+    STATION: str
+    TYPE: str
+    LLLLLLLL: str
+    COUNTRY: str
+    LANG: str
+    event: str
+    type: str
+    end: str
+    start: str
+    organization: str
+    PSSCCC: str
+    PSSCCC_list: list
+    location: str
+    date: str
+    length: str
+    seconds: int
+    MESSAGE: str
 
 
 def get_location_info(lat_lon: tuple) -> bool:
@@ -319,7 +347,7 @@ class APIv1:
     router: APIRouter
     version: str = "v1"
 
-    def __init__(self, app: FastAPI, config: Config):
+    def __init__(self, app: FastAPI, config: Config) -> None:
         self.app = app
         self.router = APIRouter()
         self.config = config
@@ -328,66 +356,163 @@ class APIv1:
         if "server" not in self.config:
             raise ConfigError("No server configuration options were provided in the configuration file")
 
-        if "key" not in self.config['server']:
-            raise ConfigError("Please provide a key in the 'server' section of the configuration file")
+        if "users" not in self.config['server']:
+            raise ConfigError("Please provide a list of users and keys in the 'server' section"
+                              " of the configuration file.")
 
-        if not self.config['server']['key']:
-            raise ConfigError("Please provide a key in the 'server' section of the configuration file")
+        if not self.config['server']['users']:
+            raise ConfigError("Please provide a list of users and keys in the 'server' section"
+                              " of the configuration file.")
 
         # Define routers for the API
         # These are standard read-only methods (they can't change anything but add data to the cache)
-        self.router.add_api_route("/all", self.get_all, methods=["POST"], dependencies=[Depends(self.check_token)],
+        # Routes that only require read permissions
+        self.router.add_api_route("/forecast/all", self.get_all_forecast_info, methods=["POST"],
+                                  dependencies=[Depends(self.check_token_read)],
                                   description="Obtain all available forecast information from the NWS")
-        self.router.add_api_route("/forecast", self.get_forecast, methods=["POST"],
-                                  dependencies=[Depends(self.check_token)],
+
+        self.router.add_api_route("/forecast/daily", self.get_forecast_info, methods=["POST"],
+                                  dependencies=[Depends(self.check_token_read)],
                                   description="Obtain only the daily forecast information from the NWS")
-        self.router.add_api_route("/hourly", self.get_hourly, methods=["POST"],
-                                  dependencies=[Depends(self.check_token)],
+
+        self.router.add_api_route("/forecast/hourly", self.get_hourly_forecast, methods=["POST"],
+                                  dependencies=[Depends(self.check_token_read)],
                                   description="Obtain only the hourly forecast information from the NWS")
-        self.router.add_api_route("/hwo", self.get_hwo, methods=["POST"], dependencies=[Depends(self.check_token)],
+
+        self.router.add_api_route("/hwo", self.get_hazardous_weather_outlook, methods=["POST"],
+                                  dependencies=[Depends(self.check_token_read)],
                                   description="Parse and obtain the Hazardous Weather Outlook from the NWS")
-        self.router.add_api_route("/spotter", self.get_spotter, methods=["POST"],
-                                  dependencies=[Depends(self.check_token)],
+
+        self.router.add_api_route("/hwo/spotter", self.get_spotter_activation_statement, methods=["POST"],
+                                  dependencies=[Depends(self.check_token_read)],
                                   description="Parse the Hazardous Weather Outlook and only obtain the Spotter "
                                               "Activation Statement")
-        # TODO: Token that can ONLY send alerts
-        self.router.add_api_route("/alert", self.receive_alert, methods=["POST"],
-                                  dependencies=[Depends(self.check_token)], description="Receive an alert from dsame3")
 
-        # Administrative methods
+        # Routers that only require alert permissions
+        self.router.add_api_route("/alert", self.receive_dsame_alert, methods=["POST"],
+                                  dependencies=[Depends(self.check_token_alert)],
+                                  description="Receive an alert from dsame3")
+
+        # Routers that require admin permissions
         # These can change server configuration options, so they will have a different token check
         # TODO: Add/remove read-only tokens, clear the cache, check the cache
 
-        self.app.include_router(self.router, prefix=f"/api/{self.version}")
+        self.app.include_router(self.router, prefix=f"/api/{self.version}/weather")
 
-    def check_token(self, key: str = Depends(oauth2_scheme)):
+    def check_token(self, key: str = Depends(oauth2_scheme)) -> None:
+        # This is replaced by the check_token_* functions that check for specific permissions
         # Protected endpoint example: https://testdriven.io/tips/6840e037-4b8f-4354-a9af-6863fb1c69eb/
         # Another API key example: https://timberry.dev/posts/fastapi-with-apikeys/
-        # TODO: Handle multiple keys
         if key != self.config['server']['key']:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Forbidden"
             )
 
+    def check_token_admin(self, key: str = Depends(oauth2_scheme)) -> None:
+        # For endpoints that are only available to administrators
+        if not self.is_admin(key):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Forbidden"
+            )
+
+    def check_token_read(self, key: str = Depends(oauth2_scheme)) -> None:
+        # For endpoints that are only available to those with read access
+        if not self.has_read_permissions(key):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Forbidden"
+            )
+
+    def check_token_alert(self, key: str = Depends(oauth2_scheme)) -> None:
+        # For the alert endpoint
+        if not self.has_alert_permissions(key):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Forbidden"
+            )
+
+    def is_admin(self, key: str) -> bool:
+        perms = self.get_token_permissions(key)
+
+        if perms['admin']:
+            return True
+
+        return False
+
+    def has_read_permissions(self, key: str) -> bool:
+        perms = self.get_token_permissions(key)
+
+        # Admin has permission, regardless of what the rest of their permissions state
+        if perms['admin']:
+            return True
+
+        if perms['readOnly']:
+            return True
+
+        return False
+
+    def has_alert_permissions(self, key: str) -> bool:
+        perms = self.get_token_permissions(key)
+        print(perms)
+
+        # Admin has permission, regardless of what the rest of their permissions state
+        if perms['admin']:
+            return True
+
+        if perms['alertOnly']:
+            return True
+
+        return False
+
+    def get_token_permissions(self, key: str) -> dict:
+        # Start out with a complete denial of permissions
+        # Any additional info in the token will also be returned
+        # admin: All permissions
+        # readOnly: Can only obtain forecast information (cannot POST alerts)
+        # alertOnly: Can only POST alerts (cannot retrieve forecast information)
+        result = {"admin": False, "readOnly": False, "alertOnly": False, "info": None}
+
+        try:
+            users = self.config['server']['users']
+        except KeyError:
+            # If the keys are not configured for whatever reason, deny all permissions
+            logging.error("The users in the config file are not configured correctly")
+            return result
+
+        for test_user in users:
+            if test_user['token'] == key:
+                result['info'] = test_user
+                if "admin" in test_user:
+                    result['admin'] = test_user['admin']
+                if "readOnly" in test_user:
+                    result['readOnly'] = test_user['readOnly']
+                if "alertOnly" in test_user:
+                    result['alertOnly'] = test_user['alertOnly']
+
+                break
+
+        return result
+
     # BEGIN API CALLBACKS
-    def get_all(self, payload: Payload):
+    def get_all_forecast_info(self, payload: Payload) -> dict:
         # /all
         return get_weather(payload)
 
-    def get_forecast(self, payload: Payload):
+    def get_forecast_info(self, payload: Payload) -> dict:
         # /forecast
         return get_weather(payload)['forecast']
 
-    def get_hourly(self, payload: Payload):
+    def get_hourly_forecast(self, payload: Payload) -> dict:
         # /hourly
         return get_weather(payload)['hourly']
 
-    def get_hwo(self, payload: Payload):
+    def get_hazardous_weather_outlook(self, payload: Payload) -> dict:
         # /hwo
         return get_weather(payload)['hwo']
 
-    def get_spotter(self, payload: Payload):
+    def get_spotter_activation_statement(self, payload: Payload) -> list:
         # /spotter
         hwo = get_weather(payload)['hwo']
         spotter = []
@@ -396,7 +521,7 @@ class APIv1:
 
         return spotter
 
-    def receive_alert(self, payload: Payload):
+    def receive_dsame_alert(self, payload: DsamePayload) -> dict:
         # /alert
         # TODO: Implement alerts
         return {"alert": "success", "payload": payload.dict()}
