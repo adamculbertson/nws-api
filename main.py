@@ -33,16 +33,17 @@ if __name__ == "__main__":
     cfg = config.load(config_path=args.config_file)
     if args.no_server:
         # Check that one or more locations were specified in the config file and exit if not
-        if "locations" not in cfg:
+        if cfg.get_value("locations") is None:
             sys.stderr.write("No location specified in the config file\n")
             sys.exit(1)
 
-        if len(cfg['locations']) < 1:
+        locations: list = cfg.get_value("locations")
+        if len(locations) < 1:
             sys.stderr.write("No location specified in the config file\n")
             sys.exit(1)
 
         forecasts = []
-        for location in cfg['locations']:
+        for location in locations:
             forecast = Forecast(cfg)
             forecast.get_point((location['lat'], location['lon']))
             forecast.get_office_info()
@@ -59,5 +60,4 @@ if __name__ == "__main__":
 
         address = cfg.get_value("server.address")
         port = cfg.get_value("server.port")
-        print(f"{address}:{port}")
         uvicorn.run(app, host=address, port=port, log_level=cfg.log_level)

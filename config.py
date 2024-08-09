@@ -3,10 +3,12 @@ import os
 import copy
 
 import yaml
+import uvicorn.logging
 
 manual_logging = False
 
 DEFAULT_CONFIG_FILE = os.path.expanduser("~/.config/forecast.yml")
+FORMAT: str = "%(levelprefix)s [%(name)s] [%(threadName)s]: %(message)s"  # Logging formatter
 
 DEFAULTS = {
     "server": {
@@ -94,6 +96,7 @@ class Config(dict):
 
     def __getitem__(self, key):
         # This doesn't really seem to work for anything outside the first key in the dictionary
+        # Better to use get_value() instead
         # Nested keys are all part of a standard dict instead
         # Try to first get the requested item form the configuration dictionary
         # If not found, ignore the KeyError and try from the defaults dictionary
@@ -191,13 +194,13 @@ class Config(dict):
                 with open(path, "rt") as f:
                     data = yaml.safe_load(f)
             else:
-                logging.error(f"Could not load extra configuration: {path} (not found)")
+                logging.warning(f"Could not load extra configuration: {path} (not found)")
                 return False
 
         self.__extra[name] = data
         return True
 
-    def get_value(self, name) -> object | dict | str | int | float | None:
+    def get_value(self, name) -> object | dict | list | str | int | float | None:
         """
         Retrieves a configuration parameter in dot notation.
         :param name: Name of the parameter to retrieve from in dot notation. Example: server.address for config['server']['address']
@@ -306,9 +309,7 @@ def load(config_path: str = DEFAULT_CONFIG_FILE, data: dict = None) -> Config:
     :return: Dictionary of configuration parameters
     """
     config = Config(config_path=config_path, data=data)
-    alert_path = str(config.get_value("server.alerts_file"))
-    if alert_path is not None:
-        config.add_extra("alerts", path=alert_path)
+    console_logging = True  # If true, set the formatting at the end. Sets to False when a log path is specified
 
     if "logging" in config:
         # Any logging option in the environment takes precedence over configuration options.
@@ -317,6 +318,7 @@ def load(config_path: str = DEFAULT_CONFIG_FILE, data: dict = None) -> Config:
         if not manual_logging:
             if "log_path" in config:
                 setup_file_logging(config['logging']['log_path'])
+                console_logging = False
                 logging.debug(f"Using log path {config['logging']['log_path']} from config")
             if "log_level" in config:
                 set_log_level(config['logging']['log_level'])
@@ -324,11 +326,27 @@ def load(config_path: str = DEFAULT_CONFIG_FILE, data: dict = None) -> Config:
 
     if "LOG_PATH" in os.environ and not manual_logging:
         logging.debug(f"Setting log path to {os.environ['LOG_PATH']} from environment")
+        console_logging = False
         setup_file_logging(os.environ['LOG_PATH'])
 
     if "LOG_LEVEL" in os.environ and not manual_logging:
         logging.debug(f"Setting log level to {os.environ['LOG_LEVEL']} from environment")
         set_log_level(os.environ['LOG_LEVEL'])
 
+    # Only set the formatter if we're not logging to a file
+    if console_logging:
+        # Set the root logger to use the formatting of uvicorn
+        logger = logging.getLogger()
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(logging.getLogger().level)
+        formatter = uvicorn.logging.DefaultFormatter(FORMAT)
+        console_handler.setFormatter(formatter)
+        logger.addHandler(console_handler)
+
     config.log_level = logging.getLogger().level
+
+    alert_path = str(config.get_value("server.alerts_file"))
+    if alert_path is not None:
+        config.add_extra("alerts", path=alert_path)
+
     return config
