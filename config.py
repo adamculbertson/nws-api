@@ -27,14 +27,14 @@ DEFAULTS = {
     "office": None # Force the NWS Office to use for the Hazardous Weather Outlook
 }
 
-# Example key item (for an admin):
+# Example user item (for an admin):
 {
     "name": "Admin",
     "admin": true,
     "token": "apiTokenHere"
 }
 
-# Example key item (for a read-only user):
+# Example user item (for a read-only user):
 {
     "name": "Read-Only user",
     "admin": false,
@@ -42,7 +42,7 @@ DEFAULTS = {
     "token": "apiTokenHere"
 }
 
-# Example key item (for an alert only user):
+# Example user item (for an alert only user):
 {
     "name": "Alert-only user",
     "admin": false,
@@ -224,5 +224,4 @@ def load(config_path: str = DEFAULT_CONFIG_FILE, data: dict = None) -> Config:
         set_log_level(os.environ['LOG_LEVEL'])
 
     config.log_level = logging.getLogger().level
-
     return config

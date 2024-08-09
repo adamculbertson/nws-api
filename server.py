@@ -86,11 +86,14 @@ class DsamePayload(BaseModel):
     MESSAGE: str
 
 
+# Enum for creating tokens
+# Only readOnly or alertOnly are possible
 class TokenType(str, Enum):
     readOnly = "readOnly"
     alertOnly = "alertOnly"
 
 
+# Model for modifying tokens
 class Token(BaseModel):
     name: str | None = None
     alertOnly: bool | None = None
