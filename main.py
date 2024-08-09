@@ -56,4 +56,8 @@ if __name__ == "__main__":
     else:
         app = FastAPI()
         api = APIv1(app=app, config=cfg)
-        uvicorn.run(app, host=cfg['server']['address'], port=cfg['server']['port'], log_level=cfg.log_level)
+
+        address = cfg.get_value("server.address")
+        port = cfg.get_value("server.port")
+        print(f"{address}:{port}")
+        uvicorn.run(app, host=address, port=port, log_level=cfg.log_level)

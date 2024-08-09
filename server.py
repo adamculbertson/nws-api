@@ -7,6 +7,7 @@ from fastapi import FastAPI, APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel
 
+import config
 import forecast
 from config import Config, ConfigError, load
 
@@ -369,14 +370,12 @@ class APIv1:
         self.config = config
 
         # Check that the config file has a "server" section and that the API key was specified in it
-        if "server" not in self.config:
+        #if "server" not in self.config:
+        if self.config.get_value("server") is None:
             raise ConfigError("No server configuration options were provided in the configuration file")
 
-        if "users" not in self.config['server']:
-            raise ConfigError("Please provide a list of users and keys in the 'server' section"
-                              " of the configuration file.")
-
-        if not self.config['server']['users']:
+        #if "users" not in self.config['server']:
+        if self.config.get_value("server.users") is None or not self.config.get_value("server.users"):
             raise ConfigError("Please provide a list of users and keys in the 'server' section"
                               " of the configuration file.")
 
@@ -707,4 +706,7 @@ if __name__ == "__main__":
     cfg = load()
     app = FastAPI()
     api = APIv1(app=app, config=cfg)
-    uvicorn.run(app, host=cfg['server']['address'], port=cfg['server']['port'], log_level=cfg.log_level)
+
+    address = str(cfg.get_value("server.address"))
+    port = int(cfg.get_value("server.port"))
+    uvicorn.run(app, host=address, port=port, log_level=cfg.log_level)

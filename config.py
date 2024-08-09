@@ -12,6 +12,7 @@ DEFAULTS = {
     "server": {
         "address": "0.0.0.0",  # IP address / hostname to bind to (all by default)
         "port": 8080,  # Port to accept connections on
+        "alerts_file": "alerts.yml",  # Path (relative to the config path) for handling alerts
         "users": []  # List of dictionaries containing tokens and their permissions
     },
     # Global forecast settings
@@ -63,6 +64,7 @@ Alert only users can ONLY send a POST request to the alert endpoint and nothing 
 class Config(dict):
     config_path: str
     __config: dict
+    __extra: dict  # List of other configuration options that may be in other files
 
     def __init__(self, config_path: str = DEFAULT_CONFIG_FILE, data: dict = None, log_level: int = logging.INFO) -> None:
         super().__init__()
@@ -73,6 +75,7 @@ class Config(dict):
         self.config_path = config_path
         self.log_level = log_level
         self.__config = data
+        self.__extra = {}
 
         if not data:
             self.load()
@@ -90,10 +93,17 @@ class Config(dict):
         del self.__config[key]
 
     def __getitem__(self, key):
+        # This doesn't really seem to work for anything outside the first key in the dictionary
+        # Nested keys are all part of a standard dict instead
         # Try to first get the requested item form the configuration dictionary
         # If not found, ignore the KeyError and try from the defaults dictionary
         try:
             return self.__config[key]
+        except KeyError:
+            pass
+
+        try:
+            return self.__extra[key]
         except KeyError:
             pass
 
@@ -105,11 +115,13 @@ class Config(dict):
         # Combine the two dictionaries with update()
         items = copy.deepcopy(DEFAULTS)
         items.update(self.__config)
+        items.update(self.__extra)
         return item in items
 
     def __iter__(self):
         items = copy.deepcopy(DEFAULTS)
         items.update(self.__config)
+        items.update(self.__extra)
         return iter(items)
 
     def clear(self):
@@ -124,16 +136,19 @@ class Config(dict):
     def keys(self):
         items = copy.deepcopy(DEFAULTS)
         items.update(self.__config)
+        items.update(self.__extra)
         return items.keys()
 
     def values(self):
         items = copy.deepcopy(DEFAULTS)
         items.update(self.__config)
+        items.update(self.__extra)
         return items.values()
 
     def items(self):
         items = copy.deepcopy(DEFAULTS)
         items.update(self.__config)
+        items.update(self.__extra)
         return items.items()
 
     def pop(self, __key):
@@ -158,6 +173,95 @@ class Config(dict):
         with open(self.config_path, "wt") as f:
             # Save only the user's config, not the defaults
             yaml.dump(self.__config, f)
+
+    def add_extra(self, name: str, path: str = None, data: dict = None) -> bool:
+        """
+        Add extra configuration options that are stored in a different file. Path OR data must be specified.
+        :param name: Unique name to use for the extra config options.
+        :param path: Optional path to the extra YAML file.
+        :param data: Optional dictionary of the extra configuration options.
+        :return:
+        """
+        if path is None and data is None:
+            logging.error("Cannot add extra to config. Need a path or data")
+            return False
+
+        if path is not None:
+            if os.path.exists(path):
+                with open(path, "rt") as f:
+                    data = yaml.safe_load(f)
+            else:
+                logging.error(f"Could not load extra configuration: {path} (not found)")
+                return False
+
+        self.__extra[name] = data
+        return True
+
+    def get_value(self, name) -> object | dict | str | int | float | None:
+        """
+        Retrieves a configuration parameter in dot notation.
+        :param name: Name of the parameter to retrieve from in dot notation. Example: server.address for config['server']['address']
+        :return: The requested value or None if not found
+        """
+
+        # No . in the name is simple, just try to get it from the config, extra, or defaults
+        # Instead of throwing a KeyError if nothing is found, return None
+        if "." not in name:
+            try:
+                return self.__config[name]
+            except KeyError:
+                pass
+
+            try:
+                return self.__extra[name]
+            except KeyError:
+                pass
+
+            try:
+                return DEFAULTS[name]
+            except KeyError:
+                return None
+
+        config = self.__config
+        extra = self.__extra
+        defaults = DEFAULTS
+
+        # Divide the name up into the various parts and loop through them
+        # Try to obtain the value from all three sections (config, extra, and defaults) until the end
+        # This way, if a result wasn't found in one, it will keep searching the rest
+        # Once a KeyError is thrown for one, that one will no longer be searched and set to None
+        parts = name.split(".")
+        for part in parts:
+            if config is not None:
+                try:
+                    config = config[part]
+                except KeyError:
+                    config = None
+
+            if extra is not None:
+                try:
+                    extra = extra[part]
+                except KeyError:
+                    extra = None
+
+            if defaults is not None:
+                try:
+                    defaults = defaults[part]
+                except KeyError:
+                    defaults = None
+
+        # Now return whichever one was found, starting first with the config, then extra, then defaults
+        if config is not None:
+            return config
+
+        if extra is not None:
+            return extra
+
+        if defaults is not None:
+            return defaults
+
+        # If nothing at all was found, return None
+        return None
 
 
 class ConfigError(Exception):
@@ -202,6 +306,9 @@ def load(config_path: str = DEFAULT_CONFIG_FILE, data: dict = None) -> Config:
     :return: Dictionary of configuration parameters
     """
     config = Config(config_path=config_path, data=data)
+    alert_path = str(config.get_value("server.alerts_file"))
+    if alert_path is not None:
+        config.add_extra("alerts", path=alert_path)
 
     if "logging" in config:
         # Any logging option in the environment takes precedence over configuration options.

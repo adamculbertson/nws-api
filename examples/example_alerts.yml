@@ -1,0 +1,32 @@
+alerts:
+  severity:
+    #Actions to perform based only on the severity
+    #Will apply to ALL SAME codes
+    test:
+      #Example action that calls a webhook when any test notice is received
+      #Webhook is currently the only type
+      - type: webhook
+        data:
+          url: https://path.to.webhook.here
+          #HTTP method to use (GET, POST, PUT, etc.)
+          method: POST
+          #Any valid HTTP header can be used here
+          headers:
+            Authorization: Bearer token-here
+            X-API-Key: API-Key-Here
+    watch: []
+    advisory: []
+    warning: []
+  same:
+    112233:
+      comment: Optional description of the SAME code
+      #Actions that are performed when ANY notice is received from the given SAME code
+      #Same format as the test one above
+      actions: []
+      #Actions based on the severity for the given same code
+      #Same format as the test one above
+      severity:
+        test: []
+        watch: []
+        advisory: []
+        warning: []
