@@ -2,7 +2,7 @@
 Fetch weather forecasts and the hazardous weather outlook from the National Weather Service
 
 ## FastAPI
-This branch is **highly** unstable, as I am currently rewriting the old, custom API to use [FastAPI](https://fastapi.tiangolo.com/). This will make the API *far* easier to implement in other products, and it will also be OpenAPI compatible.
+The API makes use of [FastAPI](https://fastapi.tiangolo.com/). This will make the API *far* easier to implement in other products, and it will also be OpenAPI compatible.
 
 ## National Weather Service API Python Library
 This is a Python library that makes use of the [API Web Service](https://www.weather.gov/documentation/services-web-api) from the National Weather Service. The current implementation is very limited, as it is based solely on my own use case.
