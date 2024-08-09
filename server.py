@@ -1,10 +1,14 @@
-import http.server
-import json
 import logging
 import time
+import uuid
+from enum import Enum
+
+from fastapi import FastAPI, APIRouter, Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer
+from pydantic import BaseModel
 
 import forecast
-from config import ConfigError, load
+from config import Config, ConfigError, load
 
 MAX_LEN = 128  # Maximum allowed length of a JSON POST payload
 CACHE_TIME = 5  # Time to cache the forecast information, in minutes
@@ -20,6 +24,8 @@ CACHE_TIME = 5  # Time to cache the forecast information, in minutes
 # City and State may be the only things provided by the client
 # If the server has not seen this combination before, which means the lat and lon are NOT in the cache, the server
 # will respond with a 404 Not Found error
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
 # TODO: Check if a location is within the grid coordinates of the office. That may allow for less lookups.
 
@@ -43,6 +49,55 @@ offices = {}
 # Office Locations
 # Format: offices_locations[office] = {"city": city, "state": state}
 offices_locations = {}
+
+
+# Client payload structure
+# All items are listed as optional, but a pair must be specified
+# For example: latitude and longitude OR city and state
+class Payload(BaseModel):
+    lat: float | str | None = None
+    lon: float | str | None = None
+    city: str | None = None
+    state: str | None = None
+
+
+# dsame3 webhook payload structure
+class DsamePayload(BaseModel):
+    ORG: str
+    EEE: str
+    TTTT: str
+    JJJHHMM: str
+    STATION: str
+    TYPE: str
+    LLLLLLLL: str
+    COUNTRY: str
+    LANG: str
+    event: str
+    type: str
+    end: str
+    start: str
+    organization: str
+    PSSCCC: str
+    PSSCCC_list: list
+    location: str
+    date: str
+    length: str
+    seconds: int
+    MESSAGE: str
+
+
+# Enum for creating tokens
+# Only readOnly or alertOnly are possible
+class TokenType(str, Enum):
+    readOnly = "readOnly"
+    alertOnly = "alertOnly"
+
+
+# Model for modifying tokens
+class Token(BaseModel):
+    name: str | None = None
+    alertOnly: bool | None = None
+    readOnly: bool | None = None
 
 
 def get_location_info(lat_lon: tuple) -> bool:
@@ -145,7 +200,7 @@ def refresh_weather(gridXY: tuple, office: str) -> dict | None:
     :return: Dictionary containing the hourly and regular forecasts, hazardous weather outlook, and update timestamp.
     """
     logging.debug(f"Calling refresh_weather(gridXY: {gridXY}, office: {office})")
-    fc = forecast.Forecast({})
+    fc = forecast.Forecast()
     hourly = fc.get_forecast_hourly(gridXY=gridXY, office=office)
 
     if hourly is None:
@@ -242,233 +297,414 @@ def parse_payload(payload: dict) -> tuple | int | None:
     return x, y, city, state
 
 
-class Server(http.server.HTTPServer):
-    def __init__(self, server_address, handler_class, config):
-        super().__init__(server_address, handler_class)
-        # TODO: Implement browser cache-control
-        self.hashes = {}  # Hashes for browser cache-control
+def get_weather(payload_model: Payload) -> dict | None:
+    """
+    Fetches the weather from the cache or calls the API to refresh the cache if necessary.
+    :param payload_model: Model from user input that contains the latitude, longitude, city, and state of the request.
+    :return: Dictionary of weather data or None on error.
+    """
+    payload = payload_model.dict()
+    result = None
+    try:
+        result = parse_payload(payload)
+        x, y, city, state = result
+    except TypeError:
+        # If None, then the location couldn't be found in the cache and it could not be determined
+        if result is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Not found. Please try specifying coordinates instead"
+            )
+
+        # Any other value is a bad request
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid parameters"
+        )
+
+    office = offices[state][city]
+    # Determine if the office dictionary exists and create it if not
+    if office not in weather_info:
+        weather_info[office] = {}
+
+    # Determine if the x coordinate dictionary exists and create it if not
+    if x not in weather_info[office]:
+        weather_info[office][x] = {}
+
+    try:
+        weather = weather_info[office][x][y]
+    except KeyError:
+        weather = refresh_weather((x, y), office)
+        if weather is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Unable to obtain weather information for the coordinates {x}, {y}"
+            )
+
+    # Check if the forecast has been cached recently
+    # If it was just crated above, then the below check should fail and not be called
+    now = int(time.time())
+
+    if weather['time'] < now - CACHE_TIME * 60:
+        weather = refresh_weather((x, y), office)
+
+        if weather is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Unable to obtain weather information for the coordinates {x}, {y}"
+            )
+
+    return weather
+
+
+class APIv1:
+    app: FastAPI
+    config: Config
+    router: APIRouter
+    version: str = "v1"
+
+    def __init__(self, app: FastAPI, config: Config) -> None:
+        self.app = app
+        self.router = APIRouter()
         self.config = config
 
         # Check that the config file has a "server" section and that the API key was specified in it
         if "server" not in self.config:
             raise ConfigError("No server configuration options were provided in the configuration file")
 
-        if "key" not in self.config['server']:
-            raise ConfigError("Please provide a key in the 'server' section of the configuration file")
+        if "users" not in self.config['server']:
+            raise ConfigError("Please provide a list of users and keys in the 'server' section"
+                              " of the configuration file.")
 
-        if not self.config['server']['key']:
-            raise ConfigError("Please provide a key in the 'server' section of the configuration file")
+        if not self.config['server']['users']:
+            raise ConfigError("Please provide a list of users and keys in the 'server' section"
+                              " of the configuration file.")
 
-    def reload(self):
-        self.hashes = {}
+        # Define routers for the API
+        # These are standard read-only methods (they can't change anything but add data to the cache)
+        # Routes that only require read permissions
+        self.router.add_api_route("/forecast/all", self.get_all_forecast_info, methods=["POST"],
+                                  dependencies=[Depends(self.check_token_read)],
+                                  description="Obtain all available forecast information from the NWS")
 
+        self.router.add_api_route("/forecast/daily", self.get_forecast_info, methods=["POST"],
+                                  dependencies=[Depends(self.check_token_read)],
+                                  description="Obtain only the daily forecast information from the NWS")
 
-class RequestHandler(http.server.BaseHTTPRequestHandler):
-    server: Server
+        self.router.add_api_route("/forecast/hourly", self.get_hourly_forecast, methods=["POST"],
+                                  dependencies=[Depends(self.check_token_read)],
+                                  description="Obtain only the hourly forecast information from the NWS")
 
-    def log_message(self, format, *args) -> None:
-        logging.info("%s - - [%s] %s\n" %
-                     (self.address_string(),
-                      self.log_date_time_string(),
-                      format % args))
+        self.router.add_api_route("/hwo", self.get_hazardous_weather_outlook, methods=["POST"],
+                                  dependencies=[Depends(self.check_token_read)],
+                                  description="Parse and obtain the Hazardous Weather Outlook from the NWS")
 
-    def send_status_code(self, code: int, message: str = None):
-        self.send_response(code)
-        cl = 0  # Content-Length value
+        self.router.add_api_route("/hwo/spotter", self.get_spotter_activation_statement, methods=["POST"],
+                                  dependencies=[Depends(self.check_token_read)],
+                                  description="Parse the Hazardous Weather Outlook and only obtain the Spotter "
+                                              "Activation Statement")
 
-        status = json.dumps({"error": 400, "message": message})
-        if message is not None:
-            cl = len(status)
+        # Routers that only require alert permissions
+        self.router.add_api_route("/alert", self.receive_dsame_alert, methods=["POST"],
+                                  dependencies=[Depends(self.check_token_alert)],
+                                  description="Receive an alert from dsame3")
 
-        cl = str(cl)
-        self.send_header("Content-Length", cl)
-        self.end_headers()
-        if message is not None:
-            self.wfile.write(status.encode("utf-8"))
+        # Routers that require admin permissions
+        # These can change server configuration options, so they will have a different token check
+        self.router.add_api_route("/admin/cache", self.admin_get_cache, methods=["GET"],
+                                  dependencies=[Depends(self.check_token_admin)],
+                                  description="View the cached forecast data")
 
-    def send_no_content(self):
-        self.send_status_code(204)
+        self.router.add_api_route("/admin/cache/clear", self.admin_clear_cache, methods=["DELETE"],
+                                  dependencies=[Depends(self.check_token_admin)],
+                                  description="Clear ALL of the currently cached forecast data")
 
-    def send_bad_request(self, message: str = None):
-        self.send_status_code(400, message)
+        self.router.add_api_route("/admin/token", self.admin_get_tokens, methods=["GET"],
+                                  dependencies=[Depends(self.check_token_admin)],
+                                  description="Get a list of non-admin tokens")
 
-    def send_forbidden(self, message: str = None):
-        self.send_status_code(403, message)
+        self.router.add_api_route("/admin/token/delete/{token}", self.admin_delete_token, methods=["DELETE"],
+                                  dependencies=[Depends(self.check_token_admin)],
+                                  description="Delete the specified non-admin token")
 
-    def send_not_found(self, message: str = None):
-        self.send_status_code(404, message)
+        self.router.add_api_route("/admin/token/create/{token_type}", self.admin_create_token, methods=["PUT"],
+                                  dependencies=[Depends(self.check_token_admin)],
+                                  description="Create a read-only or alert-only token")
 
-    def send_not_modified(self, tag=None):
-        self.send_response(304)
-        self.send_header("Content-Length", "0")
-        if tag is not None:
-            self.send_header("ETag", tag)
-        self.end_headers()
+        self.router.add_api_route("/admin/token/modify/{token}", self.admin_modify_token, methods=["POST"],
+                                  dependencies=[Depends(self.check_token_admin)],
+                                  description="Modify the specified non-admin token")
 
-    def send_json(self, data, status=200):
-        js = json.dumps(data)
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(js)))
-        self.end_headers()
-        self.wfile.write(js.encode("utf-8"))
+        self.router.add_api_route("/admin/config/save", self.admin_save_config,
+                                  methods=["POST", "GET", "HEAD", "PATCH"],
+                                  dependencies=[Depends(self.check_token_admin)],
+                                  description="Saves any modified configuration options "
+                                              "(and users) to the configuration file.")
 
-    def do_POST(self):
-        # Check for and get the authorization token
-        auth = self.headers.get("Authorization")
+        self.app.include_router(self.router, prefix=f"/api/{self.version}/weather")
 
-        # If the authorization token was not specified, send a forbidden
-        # All API requests require the token
-        if auth is None:
-            self.send_forbidden(message="Missing token")
-            return
+    # Protected endpoint example: https://testdriven.io/tips/6840e037-4b8f-4354-a9af-6863fb1c69eb/
+    # Another API key example: https://timberry.dev/posts/fastapi-with-apikeys/
 
-        # Check for a properly formatted token
-        # The token should be in the format "Bearer token"
-        # "token" is the token data
-        if not auth.startswith("Bearer"):
-            self.send_bad_request(message="Invalid token format")
-            return
+    def check_token_admin(self, token: str = Depends(oauth2_scheme)) -> None:
+        # For endpoints that are only available to administrators
+        if not self.is_admin(token):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Forbidden"
+            )
 
-        # Try to split the token by a space, to get "Bearer" and the token value
-        # If the length of the split list is not 2, then it is improperly formatted
-        tokens = auth.split(" ")
-        if len(tokens) != 2:
-            self.send_bad_request(message="Invalid token format")
-            return
+    def check_token_read(self, token: str = Depends(oauth2_scheme)) -> None:
+        # For endpoints that are only available to those with read access
+        if not self.has_read_permissions(token):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Forbidden"
+            )
 
-        # Finally, compare the token to that in the configuration data
-        # Instead of sending a forbidden message, send bad request if the token does not match
-        if tokens[1] != self.server.config['server']['key']:
-            self.send_bad_request(message="Bad token")
-            return
+    def check_token_alert(self, token: str = Depends(oauth2_scheme)) -> None:
+        # For the alert endpoint
+        if not self.has_alert_permissions(token):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Forbidden"
+            )
 
-        #  Get the payload sent by the client
-        ln = int(self.headers.get("Content-Length"))
+    def is_admin(self, token: str) -> bool:
+        perms = self.get_token_permissions(token)
 
-        # Determine if the payload is of a safe length
-        if ln > MAX_LEN:
-            self.send_bad_request(message="Payload too large")
-            return
+        if perms['admin']:
+            return True
 
-        content = self.rfile.read(ln)
-        try:
-            payload = json.loads(content)
-        except json.JSONDecodeError:
-            self.send_bad_request(message="JSON decoding error")
-            return
+        return False
 
-        # Parse the path into sections
-        # In case we're running behind a reverse proxy, strip out the "api" part of the path.
-        paths = self.path.split("/")
-        paths.pop(0)
-        if paths[0] == "api":
-            paths.pop(0)
+    def has_read_permissions(self, token: str) -> bool:
+        perms = self.get_token_permissions(token)
 
-        # If the path is /weather remove that
-        if len(paths) > 0:
-            if paths[0] == "weather":
-                paths.pop(0)
+        # Admin has permission, regardless of what the rest of their permissions state
+        if perms['admin']:
+            return True
 
-        # No path was specified, so send an invalid request.
-        if len(paths) == 0:
-            self.send_bad_request(message="No path specified")
-            return
+        if perms['readOnly']:
+            return True
 
-        # Don't bother sending a favicon. Just reply with not found.
-        elif paths[0] == "favicon.ico":
-            self.send_not_found()
-            return
+        return False
 
-        elif paths[0] == "all":
-            pass
-            weather = self.get_weather(payload)
-            self.send_json(weather)
+    def has_alert_permissions(self, token: str) -> bool:
+        perms = self.get_token_permissions(token)
+        print(perms)
 
-        elif paths[0] == "forecast":
-            weather = self.get_weather(payload)
-            self.send_json(weather['forecast'])
+        # Admin has permission, regardless of what the rest of their permissions state
+        if perms['admin']:
+            return True
 
-        elif paths[0] == "hourly":
-            weather = self.get_weather(payload)
-            self.send_json(weather['hourly'])
+        if perms['alertOnly']:
+            return True
 
-        elif paths[0] == "hwo":
-            weather = self.get_weather(payload)
-            self.send_json(weather['hwo'])
+        return False
 
-        elif paths[0] == "spotter":
-            weather = self.get_weather(payload)
-            spotter = []
-            for item in weather['hwo']:
-                spotter.append(item['spotter'])
-            self.send_json(spotter)
-
-        # Any other request is considered invalid.
-        else:
-            self.send_bad_request(message="Invalid path")
-            return
-
-    def do_GET(self):
-        # All endpoints are POST requests, so all GET requests are invalid
-        self.send_bad_request()
-
-    def get_weather(self, payload: dict) -> dict | None:
-        """
-        Fetches the weather from the cache or calls the API to refresh the cache if necessary.
-        :param payload: Dictionary that contains the latitude, longitude, city, and state of the request.
-        :return: Dictionary of weather data or None on error.
-        """
-        result = None
-        try:
-            result = parse_payload(payload)
-            x, y, city, state = result
-        except TypeError:
-            # If None, then the location couldn't be found in the cache and it could not be determined
-            if result is None:
-                self.send_not_found(message="Not found. Please try specifying coordinates instead")
-                return None
-
-            # Any other value is a bad request
-            self.send_bad_request(message="Invalid parameters")
-            return None
-
-        office = offices[state][city]
-        # Determine if the office dictionary exists and create it if not
-        if office not in weather_info:
-            weather_info[office] = {}
-
-        # Determine if the x coordinate dictionary exists and create it if not
-        if x not in weather_info[office]:
-            weather_info[office][x] = {}
+    def get_token_permissions(self, token: str) -> dict:
+        # Start out with a complete denial of permissions
+        # Any additional info in the token will also be returned
+        # admin: All permissions
+        # readOnly: Can only obtain forecast information (cannot POST alerts)
+        # alertOnly: Can only POST alerts (cannot retrieve forecast information)
+        result = {"admin": False, "readOnly": False, "alertOnly": False, "info": None}
 
         try:
-            weather = weather_info[office][x][y]
+            users = self.config['server']['users']
         except KeyError:
-            weather = refresh_weather((x, y), office)
-            if weather is None:
-                self.send_bad_request(message=f"Unable to obtain weather information for the coordinates {x}, {y}")
-                return None
+            # If the keys are not configured for whatever reason, deny all permissions
+            logging.error("The users in the config file are not configured correctly")
+            return result
 
-        # Check if the forecast has been cached recently
-        # If it was just crated above, then the below check should fail and not be called
-        now = int(time.time())
+        for test_user in users:
+            if test_user['token'] == token:
+                result['info'] = test_user
+                if "admin" in test_user:
+                    result['admin'] = test_user['admin']
+                if "readOnly" in test_user:
+                    result['readOnly'] = test_user['readOnly']
+                if "alertOnly" in test_user:
+                    result['alertOnly'] = test_user['alertOnly']
 
-        if weather['time'] < now - CACHE_TIME * 60:
-            weather = refresh_weather((x, y), office)
+                break
 
-            if weather is None:
-                self.send_bad_request(message=f"Unable to obtain weather information for the coordinates {x}, {y}")
-                return None
+        return result
 
-        return weather
+    # BEGIN API CALLBACKS
+    def admin_get_cache(self) -> dict:
+        # /admin/cache
+        return {"locations": locations, "coordinates": coordinates, "weather_info": weather_info,
+                "offices": offices, "offices_locations": offices_locations}
 
+    def admin_clear_cache(self) -> dict:
+        global locations, coordinates, weather_info, offices, offices_locations
 
-def setup(address, config):
-    return Server(address, RequestHandler, config)
+        locations = {}
+        coordinates = {}
+        weather_info = {}
+        offices = {}
+        offices_locations = {}
+
+        return {"success": True}
+
+    def admin_get_tokens(self) -> dict:
+        result = []
+        try:
+            users = self.config['server']['users']
+        except KeyError:
+            # If the keys are not configured for whatever reason, deny all permissions
+            logging.error("The users in the config file are not configured correctly")
+            return {}
+
+        admin_users = 0
+        for user in users:
+            # Don't display admin users
+            # We will count them, however
+            if self.is_admin(user['token']):
+                admin_users += 1
+                continue
+
+            result.append(user)
+
+        return {"admin_users": admin_users, "users": result}
+
+    def admin_delete_token(self, token: str) -> dict:
+        if self.is_admin(token):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Forbidden. Cannot remove admin tokens. Please see the configuration YAML file."
+            )
+
+        try:
+            users = self.config['server']['users']
+        except KeyError:
+            # If the keys are not configured for whatever reason, deny all permissions
+            logging.error("The users in the config file are not configured correctly")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="The users in the config file are not configured correctly"
+            )
+
+        for index, user in enumerate(users):
+            if user['token'] == token:
+                del self.config['server']['users'][index]
+                return {"success": True}
+
+        # If we made it to this point, then the provided token was invalid
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"The token {token} was not found"
+        )
+
+    def admin_create_token(self, token_type: TokenType) -> dict:
+        user = {}
+        if token_type is TokenType.readOnly:
+            user['readOnly'] = True
+        elif token_type is TokenType.alertOnly:
+            user['alertOnly'] = True
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid token type: {token_type.value}"
+            )
+
+        user['token'] = str(uuid.uuid4())
+
+        self.config['server']['users'].append(user)
+
+        return user
+
+    def admin_modify_token(self, token: str, payload: Token) -> dict:
+        if self.is_admin(token):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Forbidden. Cannot remove admin tokens. Please see the configuration YAML file."
+            )
+
+        try:
+            users = self.config['server']['users']
+        except KeyError:
+            # If the keys are not configured for whatever reason, deny all permissions
+            logging.error("The users in the config file are not configured correctly")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="The users in the config file are not configured correctly"
+            )
+        found = None
+        found_index = None
+        for index, user in enumerate(users):
+            if user['token'] == token:
+                found = user
+                found_index = index
+                break
+
+        if found is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"The token {token} was not found"
+            )
+
+        user = users[found_index]
+        if payload.name is not None:
+            user['name'] = payload.name
+
+        if payload.readOnly is not None:
+            user['readOnly'] = payload.readOnly
+
+        if payload.alertOnly is not None:
+            user['alertOnly'] = payload.alertOnly
+
+        self.config['server']['users'][found_index] = user
+        return {"success": True}
+
+    def admin_save_config(self) -> dict:
+        self.config.save()
+        return {"success": True}
+
+    def get_all_forecast_info(self, payload: Payload) -> dict:
+        # /all
+        return get_weather(payload)
+
+    def get_forecast_info(self, payload: Payload) -> dict:
+        # /forecast
+        return get_weather(payload)['forecast']
+
+    def get_hourly_forecast(self, payload: Payload) -> dict:
+        # /hourly
+        return get_weather(payload)['hourly']
+
+    def get_hazardous_weather_outlook(self, payload: Payload) -> list | None:
+        # /hwo
+        return get_weather(payload)['hwo']
+
+    def get_spotter_activation_statement(self, payload: Payload) -> list | None:
+        # /spotter
+        hwo = get_weather(payload)['hwo']
+        if hwo is None:
+            return None
+        spotter = []
+        for item in hwo:
+            spotter.append(item['spotter'])
+
+        return spotter
+
+    def receive_dsame_alert(self, payload: DsamePayload) -> dict:
+        # /alert
+        # TODO: Implement alerts
+        # The import and logging will be removed once implemented
+        import json
+        logging.debug(f"Received alert: {json.dumps(payload.dict())}")
+        return {"alert": "success", "payload": payload.dict()}
+
+    # END API CALLBACKS
 
 
 if __name__ == "__main__":
+    import uvicorn
+
     cfg = load()
-    s = Server((cfg['server']['address'], cfg['server']['port']), RequestHandler, cfg)
-    s.serve_forever()
+    app = FastAPI()
+    api = APIv1(app=app, config=cfg)
+    uvicorn.run(app, host=cfg['server']['address'], port=cfg['server']['port'], log_level=cfg.log_level)

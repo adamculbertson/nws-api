@@ -1,0 +1,17 @@
+locations: []
+server:
+  address: 0.0.0.0
+  port: 8080
+  users:
+  # Full admin user. Can POST alerts, view forecast information, and access admin endpoints
+  - admin: true
+    name: Admin
+    token: random_secure_token_here
+  # Read-only user. Can ONLY view forecast information
+  - readOnly: true
+    name: Read Only User
+    token: different_random_secure_token
+  # Alert-only user. Can ONLY POST alerts
+  - alertOnly: true
+    name: Alert Only User
+    token: another_different_random_token
