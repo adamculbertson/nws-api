@@ -1,6 +1,7 @@
 alerts:
   severity:
     #Actions to perform based only on the severity
+    #To determine severity, see the top of server.py
     #Will apply to ALL SAME codes
     test:
       #Example action that calls a webhook when any test notice is received
@@ -9,6 +10,7 @@ alerts:
         data:
           url: https://path.to.webhook.here
           #HTTP method to use (GET, POST, PUT, etc.)
+          #If POST, the entire received payload from dsame will be sent to the webhook as JSON
           method: POST
           #Any valid HTTP header can be used here
           headers:
@@ -17,10 +19,16 @@ alerts:
     watch: []
     advisory: []
     warning: []
+  types:
+    #Actions to perform based on the specific type of alert
+    #See alert_types.txt for what these types stand for
+    #All alert types are valid here, these are just examples
+    RWT: []
+    TOR: []
   same:
     112233:
       comment: Optional description of the SAME code
-      #Actions that are performed when ANY notice is received from the given SAME code
+      #Actions that are performed when ANY notice is received for the given SAME code
       #Same format as the test one above
       actions: []
       #Actions based on the severity for the given same code
@@ -30,3 +38,6 @@ alerts:
         watch: []
         advisory: []
         warning: []
+      types:
+        #Same as the types above, but limited to only the specified SAME code
+        TOR: []

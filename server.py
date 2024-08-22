@@ -11,8 +11,22 @@ import config
 import forecast
 from config import Config, ConfigError, load
 
-MAX_LEN = 128  # Maximum allowed length of a JSON POST payload
 CACHE_TIME = 5  # Time to cache the forecast information, in minutes
+
+# Define the severity level of each of the alert types
+# See alert_types.txt in the examples folder for what each item stands for
+severity_warn = ["AVW", "BHW", "BWW", "BZW", "CDW", "CEM", "CFW", "CHW", "CWW", "DBW", "DEW", "DSW", "EAN", "EQW",
+                 "EVI", "EWW", "FCW", "FFW", "FLW", "FRW", "FSW", "FZW", "HMW", "HUW", "HWW", "IBW", "IFW", "LAE",
+                 "LEW", "LSW", "NUW", "RHW", "SMW", "SPW", "SSW", "SVR", "TOR", "TRW", "TSW", "VOW", "WFW", "WSW",
+                 "SQW"]
+
+severity_watch = ["AVA", "CFA", "DBA", "EVA", "FFA", "FLA", "HUA", "HWA", "SSA", "SVA", "TOA", "TRA", "TSA", "WFA",
+                  "WSA"]
+
+severity_advisory = ["ADR", "CAE", "EAT", "FFS", "FLS", "HLS", "NIC", "NMN", "POS", "SPS", "SVS", "TOE"]
+
+severity_test = ["NAT",  "NPT", "NST", "RMT", "RWT", "DMO"]
+
 # When the client requests the weather information, the following payload is allowed:
 """
 {
@@ -370,11 +384,9 @@ class APIv1:
         self.config = config
 
         # Check that the config file has a "server" section and that the API key was specified in it
-        #if "server" not in self.config:
         if self.config.get_value("server") is None:
             raise ConfigError("No server configuration options were provided in the configuration file")
 
-        #if "users" not in self.config['server']:
         if self.config.get_value("server.users") is None or not self.config.get_value("server.users"):
             raise ConfigError("Please provide a list of users and keys in the 'server' section"
                               " of the configuration file.")
@@ -491,7 +503,6 @@ class APIv1:
 
     def has_alert_permissions(self, token: str) -> bool:
         perms = self.get_token_permissions(token)
-        print(perms)
 
         # Admin has permission, regardless of what the rest of their permissions state
         if perms['admin']:
@@ -694,8 +705,8 @@ class APIv1:
         # TODO: Implement alerts
         # The import and logging will be removed once implemented
         import json
-        logging.debug(f"Received alert: {json.dumps(payload.dict())}")
-        return {"alert": "success", "payload": payload.dict()}
+        logging.debug(f"Received alert: {json.dumps(payload.model_dump())}")
+        return {"alert": "success", "payload": payload.model_dump()}
 
     # END API CALLBACKS
 
