@@ -7,7 +7,9 @@ from fastapi import FastAPI, APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel
 
-import config
+import requests
+from requests.exceptions import ConnectionError
+
 import forecast
 from config import Config, ConfigError, load
 
@@ -318,7 +320,7 @@ def get_weather(payload_model: Payload) -> dict | None:
     :param payload_model: Model from user input that contains the latitude, longitude, city, and state of the request.
     :return: Dictionary of weather data or None on error.
     """
-    payload = payload_model.dict()
+    payload = payload_model.model_dump()
     result = None
     try:
         result = parse_payload(payload)
@@ -700,13 +702,177 @@ class APIv1:
 
         return spotter
 
+    def run_actions(self, actions: list, post: dict = None) -> int:
+        action_counter = 0
+        for action in actions:
+            # Verify the type is set
+            if "type" not in action:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="No type defined for the action. Check alerts configuration."
+                )
+
+            # Determine what type of action it is
+            if action['type'] == "webhook":
+                # Verify the data section exists in the config
+                if "data" not in action:
+                    raise HTTPException(
+                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                        detail="No data defined for the action. Check alerts configuration."
+                    )
+
+                # Verify that a webhook URL was specified
+                if "url" not in action['data']:
+                    raise HTTPException(
+                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                        detail="No URL defined for the webhook."
+                    )
+
+                # Determine the request method to use
+                if "method" not in action['data']:
+                    # A method wasn't specified, so default to GET
+                    method = "get"
+                elif not action['data']['method']:
+                    # A method was provided, but not set, so default to GET
+                    method = "get"
+                else:
+                    method = action['data']['method'].lower()
+
+                headers = []
+
+                if "headers" in action['data']['headers']:
+                    headers = action['data']['headers']
+
+                url = action['data']['url']
+                error = None
+
+                # If an error occurs while connecting, set the error value and set r to None
+                # The error value will be sent to the user
+                if method == "get":
+                    try:
+                        r = requests.get(url, headers=headers)
+                    except ConnectionError as e:
+                        error = e
+                        r = None
+
+                elif method == "post":
+                    try:
+                        if post is None:
+                            r = requests.post(url, headers=headers)
+                        else:
+                            r = requests.post(url, headers=headers, json=post)
+                    except ConnectionError as e:
+                        error = e
+                        r = None
+
+                elif method == "put":
+                    try:
+                        r = requests.put(url, headers=headers)
+                    except ConnectionError as e:
+                        error = e
+                        r = None
+
+                # Define any other methods to support here
+
+                else:
+                    raise HTTPException(
+                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                        detail=f"Unsupported method {method}"
+                    )
+
+                # An error occurred with the requests above, so send to the user
+                if r is None:
+                    raise HTTPException(
+                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                        detail=str(error)
+                    )
+
+                # If the webhook returns a non-200 status code, echo that status code back to the user
+                if not r.ok:
+                    raise HTTPException(
+                        status_code=r.status_code,
+                        detail=f"Webhook error. Webhook returned status code {r.status_code}"
+                    )
+
+                action_counter += 1
+
+        return action_counter
+
     def receive_dsame_alert(self, payload: DsamePayload) -> dict:
         # /alert
-        # TODO: Implement alerts
-        # The import and logging will be removed once implemented
-        import json
-        logging.debug(f"Received alert: {json.dumps(payload.model_dump())}")
-        return {"alert": "success", "payload": payload.model_dump()}
+        alert_type = payload.EEE
+        same_list = payload.PSSCCC_list
+
+        # Determine the severity of the alert
+        # Assign a default severity of None if not found
+        severity = None
+
+        if alert_type in severity_warn:
+            severity = "warning"
+        elif alert_type in severity_watch:
+            severity = "watch"
+        elif alert_type in severity_advisory:
+            severity = "advisory"
+        elif alert_type in severity_test:
+            severity = "test"
+
+        # If the alert is of unknown severity, throw a 400 Bad Request
+        if severity is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Unknown alert type: {alert_type}"
+            )
+
+        # Obtain the alerts from the configuration and check if they have been configured
+        alerts: dict = self.config.get_value("alerts")
+        if alerts is None:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Alerts have not been configured"
+            )
+
+        action_count = 0  # Counter that is incremented each time an action is ran
+
+        # Run actions for alerts based on severity
+        if "severity" in alerts:
+            if severity in alerts['severity']:
+                # Make sure we don't have an empty array
+                if alerts['severity'][severity]:
+                    logging.debug(f"Running actions for severity {severity}")
+                    action_count += self.run_actions(alerts['severity'][severity], post=payload.model_dump())
+
+        # Run actions for alerts based on the type
+        if "types" in alerts:
+            if alert_type in alerts['types']:
+                logging.debug(f"Running actions for alert type {alert_type}")
+                action_count += self.run_actions(alerts['types'], post=payload.model_dump())
+
+        # Run actions for alerts based on the SAME code
+        if "same" in alerts:
+            if alerts['same']:
+                for same in same_list:
+                    # If the current SAME code is not in the list for alerts, skip it
+                    if same not in alerts['same']:
+                        logging.debug(f"Skipping SAME code {same} as it is not in the config")
+                        continue
+
+                    entry = alerts['same'][same]
+                    if "actions" in entry:
+                        if entry['actions']:
+                            logging.debug(f"Running 'actions' section for SAME code {same}")
+                            action_count += self.run_actions(entry['actions'], post=payload.model_dump())
+
+                    if "severity" in entry:
+                        if severity in entry['severity']:
+                            logging.debug(f"Running 'severity' section for SAME code {same}")
+                            action_count += self.run_actions(entry['severity'][severity], post=payload.model_dump())
+
+                    if "types" in entry:
+                        if alert_type in entry['types']:
+                            logging.debug(f"Running alert type '{alert_type}' section for SAME code {same}")
+                            action_count += self.run_actions(entry['types'][alert_type], post=payload.model_dump())
+
+        return {"actions": action_count}
 
     # END API CALLBACKS
 

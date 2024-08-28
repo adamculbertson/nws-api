@@ -190,12 +190,19 @@ class Config(dict):
             return False
 
         if path is not None:
-            if os.path.exists(path):
-                with open(path, "rt") as f:
+            config_path = os.path.split(self.config_path)[0]
+            alerts_path = os.path.join(config_path, path)
+            if os.path.exists(alerts_path):
+                with open(alerts_path, "rt") as f:
                     data = yaml.safe_load(f)
             else:
                 logging.warning(f"Could not load extra configuration: {path} (not found)")
                 return False
+
+        # If only one element in the dictionary, and the key is the name, reassign the dictionary to the name
+        # This prevents redundant config options, such as alerts.alerts
+        if len(data) == 1 and name in data:
+            data = data[name]
 
         self.__extra[name] = data
         return True
