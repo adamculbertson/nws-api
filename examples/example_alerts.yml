@@ -26,7 +26,8 @@ alerts:
     RWT: []
     TOR: []
   same:
-    112233:
+    # IMPORTANT: Make sure to use a string for the SAME code, otherwise it will be parsed as an int/octal
+    "112233":
       comment: Optional description of the SAME code
       #Actions that are performed when ANY notice is received for the given SAME code
       #Same format as the test one above

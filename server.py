@@ -740,7 +740,7 @@ class APIv1:
 
                 headers = []
 
-                if "headers" in action['data']['headers']:
+                if "headers" in action['data']:
                     headers = action['data']['headers']
 
                 url = action['data']['url']
