@@ -126,6 +126,20 @@ def get_location_info(lat_lon: tuple) -> bool:
 
     logging.debug(f"Calling get_location_info(lat_lon: {lat_lon})")
     lat, lon = lat_lon
+
+    # If the latitude and longitude are provided as a float, round them to 2 decimal places and convert to a string
+    if type(lat) is float:
+        lat = str(round(lat, 2))
+    if type(lon) is float:
+        lon = str(round(lon, 2))
+
+    # Convert the latitude and longitude to a string if they were provided as an integer
+    # This helps make behavior more consistent.
+    if type(lat) is int:
+        lat = str(lat)
+    if type(lon) is int:
+        lon = str(lon)
+
     fc = forecast.Forecast()
     # Lookup point information
     if fc.get_point(lat_lon=lat_lon) < 0:
@@ -192,6 +206,12 @@ def get_location_grid(lat_lon: tuple) -> tuple | None:
     :return: Tuple of X, Y coordinates if found. None if not found.
     """
     lat, lon = lat_lon
+
+    # If the latitude and longitude are provided as a float, round them to 2 decimal places and convert to a string
+    if type(lat) is float:
+        lat = str(round(lat, 2))
+    if type(lon) is float:
+        lon = str(round(lon, 2))
 
     # Convert the latitude and longitude to a string if they were provided as an integer
     # This helps make behavior more consistent.
