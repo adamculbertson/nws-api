@@ -116,17 +116,7 @@ class Token(BaseModel):
     alertOnly: bool | None = None
     readOnly: bool | None = None
 
-
-def get_location_info(lat_lon: tuple) -> bool:
-    """
-    Call the point endpoint of the NWS API to obtain information for the provided coordinates.
-    :param lat_lon: Tuple of latitude and longitude coordinates.
-    :return: False if get_point() returns an error or True otherwise.
-    """
-
-    logging.debug(f"Calling get_location_info(lat_lon: {lat_lon})")
-    lat, lon = lat_lon
-
+def convert_coordinates(lat: float|int|str, lon: float|int|str) -> tuple:
     # If the latitude and longitude are provided as a float, round them to 2 decimal places and convert to a string
     if type(lat) is float:
         lat = str(round(lat, 2))
@@ -139,6 +129,19 @@ def get_location_info(lat_lon: tuple) -> bool:
         lat = str(lat)
     if type(lon) is int:
         lon = str(lon)
+
+    return lat, lon
+
+def get_location_info(lat_lon: tuple) -> bool:
+    """
+    Call the point endpoint of the NWS API to obtain information for the provided coordinates.
+    :param lat_lon: Tuple of latitude and longitude coordinates.
+    :return: False if get_point() returns an error or True otherwise.
+    """
+
+    logging.debug(f"Calling get_location_info(lat_lon: {lat_lon})")
+    lat, lon = lat_lon
+    lat, lon = convert_coordinates(lat, lon)
 
     fc = forecast.Forecast()
     # Lookup point information
@@ -206,19 +209,7 @@ def get_location_grid(lat_lon: tuple) -> tuple | None:
     :return: Tuple of X, Y coordinates if found. None if not found.
     """
     lat, lon = lat_lon
-
-    # If the latitude and longitude are provided as a float, round them to 2 decimal places and convert to a string
-    if type(lat) is float:
-        lat = str(round(lat, 2))
-    if type(lon) is float:
-        lon = str(round(lon, 2))
-
-    # Convert the latitude and longitude to a string if they were provided as an integer
-    # This helps make behavior more consistent.
-    if type(lat) is int:
-        lat = str(lat)
-    if type(lon) is int:
-        lon = str(lon)
+    lat, lon = convert_coordinates(lat, lon)
 
     try:
         info = coordinates[lat][lon]
@@ -287,8 +278,7 @@ def parse_payload(payload: dict) -> tuple | int | None:
 
             # Coordinates were provided, so use them instead
             # iOS Shortcuts app sends the latitude and longitude as an integer
-            payload_lat = str(payload['lat'])
-            payload_lon = str(payload['lon'])
+            payload_lat, payload_lon = convert_coordinates(payload['lat'], payload['lon'])
 
             # Try to get the grid X and Y coordinates from the cache first
             try:
@@ -307,8 +297,7 @@ def parse_payload(payload: dict) -> tuple | int | None:
     else:
         # Determine if the latitude AND longitude were specified by the client and send an error if not
         try:
-            lat = str(payload['lat'])
-            lon = str(payload['lon'])
+            lat, lon = convert_coordinates(payload['lat'], payload['lon'])
         except KeyError:
             return -1  # Causes a 400 error to be sent to the client
 
