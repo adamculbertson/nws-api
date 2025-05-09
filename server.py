@@ -265,6 +265,16 @@ def parse_payload(payload: dict) -> tuple | int | None:
     :return: Tuple containing x and y coordinates, city, and state on success. None or -1 on failure.
     """
     logging.debug(f"Calling parse_payload(payload: {payload})")
+
+    # Check if the city and state were provided and not None
+    # If either is set to None, delete it
+    # If they are both set to None, it still causes the first check to attempt to use them
+    if "city" in payload and "state" in payload:
+        if payload['city'] is None:
+            del payload['city']
+        if payload['state'] is None:
+            del payload['state']
+
     # If the city and state are specified in the payload, try them first
     if "city" in payload and "state" in payload:
         # Check if the city and state's coordinates are in the cache
