@@ -354,7 +354,6 @@ class Forecast:
                 elif lower.startswith(".spotter information statement"):
                     # Finish parsing days two through seven before parsing the rest
                     if mode == "days-two-seven":
-                        additional = re.sub(r'(?<!\n)\n(?!\n)', ' ', additional)
                         buffer = re.sub(r'(?<!\n)\n(?!\n)', ' ', buffer)
 
                         hwo['day27'] = {"period": additional, "info": buffer}
