@@ -338,7 +338,6 @@ class Forecast:
                     # Finish parsing day one before parsing the rest
                     if mode == "day-one":
                         if buffer != "":
-                            additional = re.sub(r'(?<!\n)\n(?!\n)', ' ', additional)
                             buffer = re.sub(r'(?<!\n)\n(?!\n)', ' ', buffer)
                             hwo['day1'] = {"period": additional, "info": buffer}
                             buffer = ""
@@ -348,6 +347,8 @@ class Forecast:
                     # Example: Saturday through Thursday
                     # Remove the " through " and just get the start and end days
                     period = info.split(" through ")
+                    period[0] = re.sub(r'(?<!\n)\n(?!\n)', ' ', period[0])
+                    period[1] = re.sub(r'(?<!\n)\n(?!\n)', ' ', period[1])
                     additional = {"start": period[0], "end": period[1]}
 
                 elif lower.startswith(".spotter information statement"):
@@ -387,7 +388,6 @@ class Forecast:
                     buffer += line + "\n"
 
             if hwo:
-                dict_keys(['state', 'city', 'datetime', 'counties', 'affected', 'day1', 'day27', 'spotter', 'motion'])
                 data.append(hwo)
 
         return data
