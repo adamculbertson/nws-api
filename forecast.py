@@ -1,4 +1,5 @@
 import logging
+import re
 from datetime import datetime
 
 import requests
@@ -264,6 +265,8 @@ class Forecast:
                         mode = "affected-areas"
 
                     elif mode == "affected-areas":
+                        buffer = re.sub(r'(?<!\n)\n(?!\n)', ' ', buffer)
+
                         hwo['affected'] = buffer.strip()
                         buffer = ""
                         mode = None
@@ -271,6 +274,8 @@ class Forecast:
 
                     elif mode == "spotter-activation":
                         if buffer != "":
+                            buffer = re.sub(r'(?<!\n)\n(?!\n)', ' ', buffer)
+
                             hwo['spotter'] = buffer.strip()
                             buffer = ""
                             mode = None
@@ -333,6 +338,8 @@ class Forecast:
                     # Finish parsing day one before parsing the rest
                     if mode == "day-one":
                         if buffer != "":
+                            additional = re.sub(r'(?<!\n)\n(?!\n)', ' ', additional)
+                            buffer = re.sub(r'(?<!\n)\n(?!\n)', ' ', buffer)
                             hwo['day1'] = {"period": additional, "info": buffer}
                             buffer = ""
 
@@ -346,7 +353,12 @@ class Forecast:
                 elif lower.startswith(".spotter information statement"):
                     # Finish parsing days two through seven before parsing the rest
                     if mode == "days-two-seven":
+                        additional = re.sub(r'(?<!\n)\n(?!\n)', ' ', additional)
+                        buffer = re.sub(r'(?<!\n)\n(?!\n)', ' ', buffer)
+
                         hwo['day27'] = {"period": additional, "info": buffer}
+                        hwo['motion'] = buffer.strip()
+
                         buffer = ""
                         additional = ""
                     mode = "spotter-activation"
@@ -357,12 +369,14 @@ class Forecast:
                 elif line.startswith("$$"):
                     # Indicates the end of the HWO for the given location, so stop parsing the lines
                     if mode == "storm-motion":
+                        buffer = re.sub(r'(?<!\n)\n(?!\n)', ' ', buffer)
                         hwo['motion'] = buffer.strip()
                     break
 
                 elif line.startswith("&&"):
                     # Indicates the end of the HWO for the given location, so stop parsing the lines
                     if mode == "storm-motion":
+                        buffer = re.sub(r'(?<!\n)\n(?!\n)', ' ', buffer)
                         hwo['motion'] = buffer.strip()
                     break
 
@@ -373,6 +387,7 @@ class Forecast:
                     buffer += line + "\n"
 
             if hwo:
+                dict_keys(['state', 'city', 'datetime', 'counties', 'affected', 'day1', 'day27', 'spotter', 'motion'])
                 data.append(hwo)
 
         return data
