@@ -4,3 +4,4 @@ forecast.json
 forecast.yml
 __pycache__
 venv
+.venv

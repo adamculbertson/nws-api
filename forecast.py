@@ -18,6 +18,12 @@ ADVISORIES_URL = BASE_URL + "/alerts/active/area/{STATE}"  # TODO
 FORECAST_URL = BASE_URL + "/gridpoints/{OFFICE}/{X},{Y}/forecast"  # X and Y are grid coordinates obtained from points
 FORECAST_URL_HOURLY = FORECAST_URL + "/hourly"
 
+# Replace any newlines that occur within a paragraph, while allowing normal newlines
+# Compile the expression to make it slightly more efficient and faster
+# Example: newlines like\nthis\n\n
+# Output: newlines like this\n\n
+replace_inline_newline = re.compile(r'(?<!\n)\n(?!\n)')
+
 """
 Steps for retrieving forecast information
 1. Get the office name or retrieve from cache. Call get_point((lat, lon)) to get this info.
@@ -265,7 +271,7 @@ class Forecast:
                         mode = "affected-areas"
 
                     elif mode == "affected-areas":
-                        buffer = re.sub(r'(?<!\n)\n(?!\n)', ' ', buffer)
+                        buffer = replace_inline_newline.sub(' ', buffer)
 
                         hwo['affected'] = buffer.strip()
                         buffer = ""
@@ -274,7 +280,7 @@ class Forecast:
 
                     elif mode == "spotter-activation":
                         if buffer != "":
-                            buffer = re.sub(r'(?<!\n)\n(?!\n)', ' ', buffer)
+                            buffer = replace_inline_newline.sub(' ', buffer)
 
                             hwo['spotter'] = buffer.strip()
                             buffer = ""
@@ -338,7 +344,7 @@ class Forecast:
                     # Finish parsing day one before parsing the rest
                     if mode == "day-one":
                         if buffer != "":
-                            buffer = re.sub(r'(?<!\n)\n(?!\n)', ' ', buffer)
+                            buffer = replace_inline_newline.sub(' ', buffer)
                             hwo['day1'] = {"period": additional, "info": buffer}
                             buffer = ""
 
@@ -347,14 +353,14 @@ class Forecast:
                     # Example: Saturday through Thursday
                     # Remove the " through " and just get the start and end days
                     period = info.split(" through ")
-                    period[0] = re.sub(r'(?<!\n)\n(?!\n)', ' ', period[0])
-                    period[1] = re.sub(r'(?<!\n)\n(?!\n)', ' ', period[1])
+                    period[0] = replace_inline_newline.sub(' ', period[0])
+                    period[1] = replace_inline_newline.sub(' ', period[1])
                     additional = {"start": period[0], "end": period[1]}
 
                 elif lower.startswith(".spotter information statement"):
                     # Finish parsing days two through seven before parsing the rest
                     if mode == "days-two-seven":
-                        buffer = re.sub(r'(?<!\n)\n(?!\n)', ' ', buffer)
+                        buffer = replace_inline_newline.sub(' ', buffer)
 
                         hwo['day27'] = {"period": additional, "info": buffer}
                         hwo['motion'] = buffer.strip()
@@ -369,14 +375,14 @@ class Forecast:
                 elif line.startswith("$$"):
                     # Indicates the end of the HWO for the given location, so stop parsing the lines
                     if mode == "storm-motion":
-                        buffer = re.sub(r'(?<!\n)\n(?!\n)', ' ', buffer)
+                        buffer = replace_inline_newline.sub(' ', buffer)
                         hwo['motion'] = buffer.strip()
                     break
 
                 elif line.startswith("&&"):
                     # Indicates the end of the HWO for the given location, so stop parsing the lines
                     if mode == "storm-motion":
-                        buffer = re.sub(r'(?<!\n)\n(?!\n)', ' ', buffer)
+                        buffer = replace_inline_newline.sub(' ', buffer)
                         hwo['motion'] = buffer.strip()
                     break
 
