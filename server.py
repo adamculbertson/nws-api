@@ -67,6 +67,9 @@ offices = {}
 # Format: offices_locations[office] = {"city": city, "state": state}
 offices_locations = {}
 
+# Zone IDs
+# Format: zone_ids[office][x][y] = zoneID
+zone_ids = {}
 
 # Client payload structure
 # All items are listed as optional, but a pair must be specified
@@ -187,6 +190,16 @@ def get_location_info(lat_lon: tuple) -> bool:
     if fc.office not in offices_locations:
         offices_locations[fc.office] = {}
 
+    # Check if the office key exists
+    if fc.office not in zone_ids:
+        zone_ids[fc.office] = {}
+
+    x, y = fc.grid
+
+    # Check if the x coordinate key exists
+    if x not in zone_ids[fc.office]:
+        zone_ids[fc.office][x] = {}
+
     # End creating dictionaries
 
     # Start filling in the cache information
@@ -198,6 +211,8 @@ def get_location_info(lat_lon: tuple) -> bool:
     offices_locations[fc.office] = {"city": fc.office_city, "state": fc.office_state}
     # Assign the office to the given city and state for the user
     offices[fc.state][fc.city] = fc.office
+    # Set the zone ID to the given grid coordinates
+    zone_ids[fc.office][x][y] = fc.zone_id
 
     return True
 
@@ -240,10 +255,12 @@ def refresh_weather(gridXY: tuple, office: str) -> dict | None:
         return None
 
     try:
+        x, y = gridXY
         fc.office = office
         office_info = offices_locations[office]
         fc.office_city = office_info['city']
         fc.office_state = office_info['state']
+        fc.zone_id = zone_ids[office][x][y]
     except KeyError:
         logging.error(f"Unable to locate information for {office} in the office location cache.")
         return None

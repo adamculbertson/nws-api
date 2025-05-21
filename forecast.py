@@ -1,22 +1,28 @@
 import logging
 import re
+import os
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import requests
-from bs4 import BeautifulSoup
 
-# URL to obtain the Hazardous Weather Outlook
-# OFFICE will be converted to the appropriate NWS office to use
-HWO = "https://forecast.weather.gov/wwamap/wwatxtget.php?cwa={OFFICE}&wwa=hazardous%20weather%20outlook"
+# Try to set the timezone from the environment
+# Fallback to UTC if one is not set
+try:
+    TZ = os.environ['TZ']
+except KeyError:
+    TZ = "UTC"
 
 # NWS API: https://api.weather.gov/openapi.json
 
+# Define API endpoints
 BASE_URL = "https://api.weather.gov"
 OFFICE_URL = BASE_URL + "/offices/{OFFICE}"
 POINTS_URL = BASE_URL + "/points/{LAT},{LON}"
 ADVISORIES_URL = BASE_URL + "/alerts/active/area/{STATE}"  # TODO
 FORECAST_URL = BASE_URL + "/gridpoints/{OFFICE}/{X},{Y}/forecast"  # X and Y are grid coordinates obtained from points
 FORECAST_URL_HOURLY = FORECAST_URL + "/hourly"
+HWO_URL = BASE_URL + "/products/types/HWO/locations/{OFFICE}"
 
 # Replace any newlines that occur within a paragraph, while allowing normal newlines
 # Compile the expression to make it slightly more efficient and faster
@@ -24,12 +30,177 @@ FORECAST_URL_HOURLY = FORECAST_URL + "/hourly"
 # Output: newlines like this\n\n
 replace_inline_newline = re.compile(r'(?<!\n)\n(?!\n)')
 
+# Matches a section of a HWO
+# Need to take into account the extra information in "DAY 1" and "DAYS 2 THROUGH 7"
+
+section_pattern = re.compile(
+    r'''
+    ^\.(?P<dot_header>[A-Z0-9 \-]+?)\.\.\.(?P<dot_description>.*?)$    # .SECTION...Description
+    | ^(?P<colon_header>[A-Z0-9 \- ]+):$                               # SECTION:
+    | ^(?P<divider>&&|\$\$)$                                          # && or $$
+    ''',
+    re.MULTILINE | re.VERBOSE
+)
+
+# Matches the list of zones from an HWO entry
+zone_line_pattern = re.compile(r'^[A-Z]{3}\d{3}.*\d{3}', re.MULTILINE)
+
 """
 Steps for retrieving forecast information
 1. Get the office name or retrieve from cache. Call get_point((lat, lon)) to get this info.
 2. If not cached, get the city and state for the NWS office via get_office_info()
 3. Call get_hwo() or any other forecast item.
 """
+
+def hwo_parse_headers(text: str) -> dict | None:
+    """
+    Parses information from the headers of a Hazardous Weather Outlook
+    :param text: Contents of the Hazardous Weather Outlook (HWO)
+    :return: Dict with message_number, wmo_code, site_id, datetime_utc, and awips_id (or None if not found)
+    """
+    # Normalize line endings
+    lines = text.strip().splitlines()
+
+    if len(lines) < 3:
+        return None  # Not enough header lines
+
+    message_number = lines[0].strip()
+
+    # Match WMO header (e.g., FLUS43 KLMK)
+    wmo_match = re.match(r'^([A-Z]{4}\d{2})\s+([A-Z]{4})\s+(\d{6})$', lines[1].strip())
+    if not wmo_match:
+        # Nothing found, return None
+        return None
+
+    wmo_code, site_id, date_code = wmo_match.groups()
+
+    # Parse AWIPS ID
+    awips_id = lines[2].strip()
+
+    return {
+        "message_number": message_number,
+        "wmo_code": wmo_code,
+        "site_id": site_id,
+        #"issued": datetime.strptime(date_code, "%y%m%d%H%M").replace(tzinfo=timezone.utc).isoformat(),
+        "issued": date_code,
+        "awips_id": awips_id,
+    }
+
+def hwo_get_zones(line: str) -> list[str]:
+    """
+    Retrieves a formatted list of zones from the zone line.
+    :param line: Encoded line to parse for zone IDs.
+    :return: List of zone IDs
+    """
+    result = []
+    current_prefix = None
+    parts = line.replace('\n', '').split('-')
+
+    for part in parts:
+        match = re.match(r'([A-Z]{3})?(\d{3})(?:>(\d{3}))?', part)
+        if match:
+            prefix, start, end = match.groups()
+            if prefix:
+                current_prefix = prefix
+            if not current_prefix:
+                continue
+            start_num = int(start)
+            end_num = int(end) if end else start_num
+            for z in range(start_num, end_num + 1):
+                result.append(f"{current_prefix}{z:03d}")
+    return result
+
+def hwo_parse(text: str, zone_search: str = None) -> dict | list | None:
+    """
+    Parses the contents of the Hazardous Weather Outlook.
+    :param zone_search: If specified, ignores HWO entries that do not match the specified Zone ID
+    :param text: Raw, unparsed, content.
+    :return: List (or dict if only one entry) of found entries in the HWO or None if none were found.
+    """
+    text = text.strip().replace('\r\n', '\n')
+
+    # $$ indicates the end of one block (HWO entry)
+    raw_blocks = re.split(r'^\$\$(?:\s*\n.*)?$', text, flags=re.MULTILINE)
+
+    blocks = []
+
+    for block in raw_blocks:
+        block = block.strip()
+        if not block:
+            continue
+
+        sections = {}
+        # Search for various patterns (sections, zone IDs, intro paragraph)
+        matches = list(section_pattern.finditer(block))
+        zone_line_match = zone_line_pattern.search(block)
+
+        intro_match = re.search(
+            r'(This Hazardous Weather Outlook is for.*?)\n\n(?=\.[A-Z0-9 \-]+\.\.\.)',
+            text,
+            re.DOTALL
+        )
+
+        sections['intro'] = intro_match.group(1).replace('\n', ' ').strip()
+
+        if zone_line_match:
+            zone_line = zone_line_match.group(0)
+            sections['zones'] = hwo_get_zones(zone_line)
+
+            if zone_search is not None:
+                if zone_search not in sections['zones']:
+                    continue
+
+        for i, match in enumerate(matches):
+            start = match.end()
+            end = matches[i + 1].start() if i + 1 < len(matches) else len(block)
+            section_content = replace_inline_newline.sub(' ', block[start:end].strip())
+
+            if match.group('divider'):
+                section_title = 'additional'
+                sections[section_title] = section_content
+
+            elif match.group("colon_header"):
+                section_title = match.group("colon_header").lower()
+
+                if "general storm motion of the day" in section_title:
+                    section_title = "motion"
+
+                sections[section_title] = section_content
+
+            else:
+                header = match.group('dot_header').strip()
+                description = match.group('dot_description').strip()
+
+                section_title = header.lower()
+
+                # Check for the most common section titles and shorten their names
+                if section_title.startswith("day one"):
+                    section_title = "day1"
+                elif section_title.startswith("days two through seven"):
+                    section_title = "days2-7"
+                elif section_title.startswith("spotter information statement"):
+                    section_title = "spotter"
+
+                if not description.strip():
+                    # For items that do not contain a description
+                    sections[section_title] = section_content
+                else:
+                    sections[section_title] = {
+                        "description": description,
+                        "content": section_content
+                    }
+
+                # For the days 2-7 outlook, parse the start and end days
+                if section_title == "days2-7":
+                    period = description.split(" through ")
+                    sections[section_title]['period'] = {"start": period[0], "end": period[1]}
+
+        blocks.append(sections)
+
+    # Return just the dictionary if only one entry
+    if len(blocks) > 1:
+        return blocks
+    return blocks[0]
 
 
 class Forecast:
@@ -47,6 +218,7 @@ class Forecast:
         self.city = None
         self.state = None
         self.weather = {}
+        self.zone_id = None
 
         # Determine if the office is in the configuration
         if "office" in config:
@@ -91,6 +263,11 @@ class Forecast:
         # Seems the API returns the coordinates backwards? At least it does in my tests
         self.city_lat_lon = (data['properties']['relativeLocation']['geometry']['coordinates'][1],
                              data['properties']['relativeLocation']['geometry']['coordinates'][0])
+
+        # Extract the Zone ID from the forecastZone element
+        # The Zone ID is contained in the foreCast zone as a URL
+        # Split the URL by / and get the last item (the zone ID)
+        self.zone_id = data['properties']['forecastZone'].split("/")[-1]
 
         return 0
 
@@ -217,15 +394,13 @@ class Forecast:
         """
         return self.get_forecast(gridXY=gridXY, office=office, hourly=True)
 
-    def get_hwo(self, include_all: bool = False) -> list | None:
+    def get_hwo(self, today_only: bool = True) -> list | None:
         """
-        Obtain the Hazardous Weather Outlook for the stored location information.
-        :param include_all: If True, don't restrict the HWO to the provided office.
-        :return: List of data from the HWO (multiple if include_all) or None if any information is missing.
+        Retrieves the Hazardous Weather Outlook (HWO) product from the NWS API.
+        :param today_only: If True, only return entries from today
+        :return: List of HWO entries or None if none were found
         """
-        # TODO: Use a tuple to hold the office, city, and state rather than instead?
-
-        data = []
+        hwo_list = []
         # If the office has not already been specified, try to determine it from the coordinates
         if self.office is None:
             # If the latitude and longitude tuple is not empty, try to get the point information from the API
@@ -241,158 +416,52 @@ class Forecast:
                 logging.error(f"Failed to get point information twice using lat/lon: {self.lat_lon}")
                 return None
 
-        # Get the URL using the office value
-        url = HWO.replace("{OFFICE}", self.office)
+        url = HWO_URL.replace("{OFFICE}", self.office)
 
         r = requests.get(url)
         r.raise_for_status()
-        html = r.text
-        soup = BeautifulSoup(html, "html.parser")
-        items = soup.find_all("pre", string=True)
+        js = r.json()
 
-        for item in items:
-            hwo = {}
-            lc = 0  # Line counter, only used for the date/time parser
-            mode = None  # Determines what we are parsing, for multi-line parsers
-            buffer = ""  # Buffer to hold the data as it's being processed
-            additional = ""  # Any additional data, such as the affected time for day one and values for days 2-7
+        # Loop through all the HWO entries to get the ID
+        for item in js['@graph']:
+            # Retrieve the actual entry with the @id parameter
+            r = requests.get(item['@id'])
+            r.raise_for_status()
 
-            for line in item.text.splitlines():
-                lc += 1
-                lower = line.lower()  # Lowercase line for easier checking
-                if line == "" or line == " ":
-                    # Once on a blank line, indicate that county parsing is done (but only if line count is more than 4)
-                    # Don't skip if done, because the mode check will handle continuing
-                    if mode == "county" and lc > 4:
-                        # TODO: Parse the counties list
-                        hwo['counties'] = buffer.strip()
-                        buffer = ""
-                        # Once completed with the county parsing, set the mode to parsing the affected areas
-                        mode = "affected-areas"
+            data = r.json()
+            raw_hwo = data.pop('productText') # Remove the productText so that there are no duplicates
 
-                    elif mode == "affected-areas":
-                        buffer = replace_inline_newline.sub(' ', buffer)
+            # Parse the time information if we are skipping entries that aren't from today
+            if today_only:
+                # Parse the UTC time string
+                utc_dt = datetime.fromisoformat(data['issuanceTime'])
 
-                        hwo['affected'] = buffer.strip()
-                        buffer = ""
-                        mode = None
-                        continue
+                # Get the local timezone info
+                local_tz = ZoneInfo(TZ)
 
-                    elif mode == "spotter-activation":
-                        if buffer != "":
-                            buffer = replace_inline_newline.sub(' ', buffer)
+                # Convert to local time
+                local_dt = utc_dt.astimezone(local_tz)
 
-                            hwo['spotter'] = buffer.strip()
-                            buffer = ""
-                            mode = None
-                            continue
+                # Get today's date in local time
+                today_local = datetime.now(local_tz).date()
 
-                    else:
-                        continue
-
-                if lc == 1:
-                    # Skip the first line, which usually just states "Hazardous Weather Outlook"
+                # Compare to the local time and skip if it is not from today
+                if local_dt.date() != today_local:
+                    logging.debug(f"Skipping product with issuanceTime of {data['issuanceTime']}. Local time is {today_local}")
                     continue
 
-                elif lc == 2:
-                    # Get the National Weather Service office
-                    # The line starts with "National Weather Service " (space at the end), so get rid of that
-                    line = line.replace("National Weather Service ", "")
-                    # Only the city and state (no comma separation) are left, so separate them by removing the spaces
-                    city_state = line.split(" ")
-                    state = city_state.pop(-1)  # State is the last item in the list, so pop it to get it
-                    # All that remains is the city
-                    # If the city name is one that contains spaces, then there will be more than one item in the list
-                    # Join the list together by spaces so that we get the proper city name
-                    city = " ".join(city_state)
-
-                    # Check if we've previously obtained the weather information to get the office that we are
-                    # looking for
-                    # Setting include_all to True will skip the check
-                    if self.office_state is not None and self.office_city is not None:
-
-                        if not include_all and self.office_state != state:
-                            # State doesn't match, so end line parsing
-                            break
-
-                        if not include_all and self.office_city != city:
-                            # City doesn't match, so end line parsing
-                            break
-
-                    hwo['state'] = state
-                    hwo['city'] = city
-
-                elif lc == 3:
-                    # We need to strip out the timezone information, as %Z is not reliable
-                    # To do this, we split the line by spaces
-                    # Typical format of the NWS date: 700 PM EDT Fri May 10 2024
-                    # We pop the value at index 2, then join the array with spaces
-
-                    arr = line.split(" ")
-                    arr.pop(2)  # Removes the timezone information
-                    line = " ".join(arr)  # Re-joins the array as the original string
-                    hwo['datetime'] = datetime.strptime(line, "%I%M %p %a %b %d %Y").isoformat()
-
-                    mode = "county"  # Sets the mode to county parser, as that should be next
-
-                elif lower.startswith(".day one"):
-                    mode = "day-one"
-                    # Remove periods and the DAY ONE text to get the time period
-                    additional = line.replace(".DAY ONE...", "").replace(".", "")
-
-                elif lower.startswith(".days two through seven"):
-                    # Finish parsing day one before parsing the rest
-                    if mode == "day-one":
-                        if buffer != "":
-                            buffer = replace_inline_newline.sub(' ', buffer)
-                            hwo['day1'] = {"period": additional, "info": buffer}
-                            buffer = ""
-
-                    mode = "days-two-seven"
-                    info = line.replace(".DAYS TWO THROUGH SEVEN...", "").replace(".", "")
-                    # Example: Saturday through Thursday
-                    # Remove the " through " and just get the start and end days
-                    period = info.split(" through ")
-                    period[0] = replace_inline_newline.sub(' ', period[0])
-                    period[1] = replace_inline_newline.sub(' ', period[1])
-                    additional = {"start": period[0], "end": period[1]}
-
-                elif lower.startswith(".spotter information statement"):
-                    # Finish parsing days two through seven before parsing the rest
-                    if mode == "days-two-seven":
-                        buffer = replace_inline_newline.sub(' ', buffer)
-
-                        hwo['day27'] = {"period": additional, "info": buffer}
-                        hwo['motion'] = buffer.strip()
-
-                        buffer = ""
-                        additional = ""
-                    mode = "spotter-activation"
-
-                elif lower.startswith("general storm motion of the day:"):
-                    mode = "storm-motion"
-
-                elif line.startswith("$$"):
-                    # Indicates the end of the HWO for the given location, so stop parsing the lines
-                    if mode == "storm-motion":
-                        buffer = replace_inline_newline.sub(' ', buffer)
-                        hwo['motion'] = buffer.strip()
-                    break
-
-                elif line.startswith("&&"):
-                    # Indicates the end of the HWO for the given location, so stop parsing the lines
-                    if mode == "storm-motion":
-                        buffer = replace_inline_newline.sub(' ', buffer)
-                        hwo['motion'] = buffer.strip()
-                    break
-
-                elif mode == "county" or mode == "affected-areas" or mode == "spotter-activation":
-                    buffer += line + " "
-
-                elif mode == "day-one" or mode == "days-two-seven" or mode == "storm-motion":
-                    buffer += line + "\n"
+            hwo = hwo_parse(raw_hwo, zone_search=self.zone_id)
 
             if hwo:
-                data.append(hwo)
+                # If the HWO is a list, add the metadata to each entry
+                # Otherwise, just add it to the dictionary
+                if type(hwo) is list:
+                    for i in range(len(hwo)):
+                        hwo[i]['meta'] = data
+                else:
+                    hwo['meta'] = data
 
-        return data
+                logging.debug(f"{self.zone_id}  {len(hwo)}  {item['@id']}  {hwo}")
+                hwo_list.append(hwo)
+
+        return hwo_list
