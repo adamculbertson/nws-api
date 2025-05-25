@@ -12,6 +12,7 @@ FORMAT: str = "%(levelprefix)s [%(name)s] [%(threadName)s]: %(message)s"  # Logg
 
 DEFAULTS = {
     "server": {
+        "cache_time": 5, # Time to cache the forecast information, in minutes
         "address": "0.0.0.0",  # IP address / hostname to bind to (all by default)
         "port": 8080,  # Port to accept connections on
         "alerts_file": "alerts.yml",  # Path (relative to the config path) for handling alerts
@@ -19,7 +20,12 @@ DEFAULTS = {
     },
     # Global forecast settings
     # Location can be left blank
-    "locations": []  # Locations to monitor the forecast for. For more information, see the example below.
+    "locations": [],  # Locations to monitor the forecast for. For more information, see the example below.
+    "hwo": {
+        # Lowercase version of text to skip sending
+        # If BOTH the Day 1 and Days 2-7 outlooks contain this string, then the HWO will be ignored
+        "ignore_text": "no hazardous weather is expected at this time"
+    }
 }
 
 """
@@ -355,5 +361,9 @@ def load(config_path: str = DEFAULT_CONFIG_FILE, data: dict = None) -> Config:
     alert_path = str(config.get_value("server.alerts_file"))
     if alert_path is not None:
         config.add_extra("alerts", path=alert_path)
+
+    # Specifically set urllib3 (requests) to INFO, as it can be quite chatty
+    urllib_logger = logging.getLogger('urllib3')
+    urllib_logger.setLevel(logging.INFO)
 
     return config

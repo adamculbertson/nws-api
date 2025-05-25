@@ -13,8 +13,6 @@ from requests.exceptions import ConnectionError
 import forecast
 from config import Config, ConfigError, load
 
-CACHE_TIME = 5  # Time to cache the forecast information, in minutes
-
 # Define the severity level of each of the alert types
 # See alert_types.txt in the examples folder for what each item stands for
 severity_warn = ["AVW", "BHW", "BWW", "BZW", "CDW", "CEM", "CFW", "CHW", "CWW", "DBW", "DEW", "DSW", "EAN", "EQW",
@@ -120,6 +118,12 @@ class Token(BaseModel):
     readOnly: bool | None = None
 
 def convert_coordinates(lat: float|int|str, lon: float|int|str) -> tuple:
+    """
+    Convert the given latitude and longitude to a string, while also rounding down any floats.
+    :param lat: Latitude as a float, integer, or string.
+    :param lon: Longitude as a float, integer, or string.
+    :return: Tuple containing the modified latitude and longitude
+    """
     # If the latitude and longitude are provided as a float, round them to 2 decimal places and convert to a string
     if type(lat) is float:
         lat = str(round(lat, 2))
@@ -265,14 +269,49 @@ def refresh_weather(gridXY: tuple, office: str) -> dict | None:
         logging.error(f"Unable to locate information for {office} in the office location cache.")
         return None
 
-    hwo = fc.get_hwo()
     timestamp = int(time.time())
 
-    data = {"hourly": hourly, "forecast": regular, "hwo": hwo, "time": timestamp}
+    data = {"hourly": hourly, "forecast": regular, "time": timestamp}
 
     x, y = gridXY
     weather_info[office][x][y] = data
     return data
+
+def get_hwo(payload_model: Payload, config: Config) -> list | None:
+    """
+    Get the Hazardous Weather Outlook for the given latitude and longitude
+    :param config: Configuration options for the server
+    :param payload_model: User-provided payload
+    :return: Dictionary containing the HWO result
+    """
+    payload = payload_model.model_dump()
+    if not "lat" or not "lon" in payload:
+        return None
+
+    lat, lon = convert_coordinates(payload['lat'], payload['lon'])
+
+    fc = forecast.Forecast()
+    fc.lat_lon = (lat, lon)
+    hwo = fc.get_hwo() # TODO: Cache the HWO results similar to the forecast cache
+
+    if len(hwo) > 0:
+        # Check if the newest alert is similar to the ignore text
+        # If BOTH 'day1' AND 'days2-7' contain the 'hwo.ignore_text' config string, then no HWO will be sent
+        ignore_test = 0 # When 2, this HWO will be ignored
+        ignore_text = config.get_value("hwo.ignore_text")
+
+        if ignore_text in hwo[0]['day1']['content'].lower():
+            ignore_test += 1
+
+        if ignore_text in hwo[0]['days2-7']['content'].lower():
+            ignore_test += 1
+
+        # Ignore the HWO entry
+        if ignore_test >= 2:
+            logging.debug(f"Ignoring HWO entry due to {ignore_text} being present")
+            hwo = []
+
+    return hwo
 
 
 def parse_payload(payload: dict) -> tuple | int | None:
@@ -350,9 +389,10 @@ def parse_payload(payload: dict) -> tuple | int | None:
     return x, y, city, state
 
 
-def get_weather(payload_model: Payload) -> dict | None:
+def get_weather(payload_model: Payload, config: Config = None) -> dict | None:
     """
     Fetches the weather from the cache or calls the API to refresh the cache if necessary.
+    :param config: Configuration information class
     :param payload_model: Model from user input that contains the latitude, longitude, city, and state of the request.
     :return: Dictionary of weather data or None on error.
     """
@@ -395,10 +435,10 @@ def get_weather(payload_model: Payload) -> dict | None:
             )
 
     # Check if the forecast has been cached recently
-    # If it was just crated above, then the below check should fail and not be called
+    # If it was just created above, then the below check should fail and not be called
     now = int(time.time())
 
-    if weather['time'] < now - CACHE_TIME * 60:
+    if weather['time'] < now - config.get_value("server.cache_time") * 60:
         weather = refresh_weather((x, y), office)
 
         if weather is None:
@@ -713,24 +753,24 @@ class APIv1:
 
     def get_all_forecast_info(self, payload: Payload) -> dict:
         # /all
-        return get_weather(payload)
+        return get_weather(payload, config=self.config)
 
     def get_forecast_info(self, payload: Payload) -> dict:
         # /forecast
-        return get_weather(payload)['forecast']
+        return get_weather(payload, config=self.config)['forecast']
 
     def get_hourly_forecast(self, payload: Payload) -> dict:
         # /hourly
-        return get_weather(payload)['hourly']
+        return get_weather(payload, config=self.config)['hourly']
 
     def get_hazardous_weather_outlook(self, payload: Payload) -> list | None:
         # /hwo
-        return get_weather(payload)['hwo']
+        return get_hwo(payload, config=self.config)
 
     def get_spotter_activation_statement(self, payload: Payload) -> list | None:
         # /spotter
-        hwo = get_weather(payload)['hwo']
-        if hwo is None:
+        hwo = get_hwo(payload, config=self.config)['hwo']
+        if hwo is None or not hwo:
             return None
         spotter = []
         for item in hwo:
