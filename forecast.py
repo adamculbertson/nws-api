@@ -1,6 +1,7 @@
 import logging
 import re
 import os
+import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -12,6 +13,13 @@ try:
     TZ = os.environ['TZ']
 except KeyError:
     TZ = "UTC"
+
+# OpenWeatherMap API calls
+# https://openweathermap.org/api/geocoding-api
+# Look up coordinates based on the city and state
+GET_CITY_STATE = "http://api.openweathermap.org/geo/1.0/direct?q={CITY},{STATE},US&limit=1&appid={API_KEY}"
+# Look up coordinates based on the zip code
+GET_ZIP = "http://api.openweathermap.org/geo/1.0/zip?zip={ZIP},US&appid={API_KEY}"
 
 # NWS API: https://api.weather.gov/openapi.json
 
@@ -51,6 +59,8 @@ Steps for retrieving forecast information
 2. If not cached, get the city and state for the NWS office via get_office_info()
 3. Call get_hwo() or any other forecast item.
 """
+
+verbosity = 1 # The higher the level, the more output
 
 def hwo_parse_headers(text: str) -> dict | None:
     """
@@ -208,17 +218,17 @@ class Forecast:
         if config is None:
             config = {}
 
-        self.config = config
-        self.lat_lon = ()  # Provided coordinates
-        self.city_lat_lon = ()  # Coordinates of the city and state for the provided ones
-        self.grid = ()  # Grid location of the city coordinates
-        self.office = None  # National Weather Service office that is responsible for the grid location
-        self.office_city = None  # City of the NWS office
-        self.office_state = None  # State of the NWS office
-        self.city = None
-        self.state = None
-        self.weather = {}
-        self.zone_id = None
+        self.config: dict = config
+        self.lat_lon: tuple[str|int|float|None,str|int|float|None] = (None, None)  # Provided coordinates
+        self.city_lat_lon: tuple[str|int|float|None,str|int|float|None] = (None, None)  # Coordinates of the city and state for the provided ones
+        self.grid: tuple[str|int|float|None,str|int|float|None] = (None, None)  # Grid location of the city coordinates
+        self.office: str | None = None  # National Weather Service office that is responsible for the grid location
+        self.office_city: str | None = None  # City of the NWS office
+        self.office_state: str | None = None  # State of the NWS office
+        self.city: str | None = None
+        self.state: str | None = None
+        self.weather: dict = {}
+        self.zone_id: str | None = None
 
         # Determine if the office is in the configuration
         if "office" in config:
@@ -240,7 +250,7 @@ class Forecast:
             self.lat_lon = lat_lon
 
         # No latitude/longitude pair stored or provided, so return -1 to indicate an error.
-        if not self.lat_lon:
+        if not all(self.lat_lon):
             return -1
 
         latitude, longitude = self.lat_lon
@@ -308,10 +318,10 @@ class Forecast:
         self.weather['forecast'] = self.get_forecast()
         self.weather['hwo'] = self.get_hwo()
 
-    def get_forecast(self, gridXY: tuple = None, office: str = None, hourly: bool = False) -> dict | None:
+    def get_forecast(self, grid_xy: tuple = None, office: str = None, hourly: bool = False) -> dict | None:
         """
         Get the forecast, either hourly or weekly, from the National Weather Service.
-        :param gridXY: Optional tuple containing the grid X and Y coordinates to get the forecast for
+        :param grid_xy: Optional tuple containing the grid X and Y coordinates to get the forecast for
         :param office: Optional string containing the office to obtain the forecast from.
         :param hourly: If true, fetch the hourly forecast instead.
         :return: Dictionary containing forecast information.
@@ -333,11 +343,11 @@ class Forecast:
                 office = self.office
 
         # If no grid coordinates were provided, then try to get them from the already present value
-        if gridXY is None and self.grid:
+        if grid_xy is None and all(self.grid):
             x, y = self.grid
 
-        elif gridXY is not None:
-            x, y = gridXY
+        elif grid_xy is not None:
+            x, y = grid_xy
 
         else:
             # We still do not have the grid coordinates, so try calling get_point() to retrieve them
@@ -385,14 +395,14 @@ class Forecast:
 
         return forecast
 
-    def get_forecast_hourly(self, gridXY: tuple = None, office: str = None) -> dict | None:
+    def get_forecast_hourly(self, grid_xy: tuple = None, office: str = None) -> dict | None:
         """
         Helper function that simply calls get_forecast with the hourly parameter.
-        :param gridXY: Optional tuple containing the grid X and Y coordinates to get the forecast for
+        :param grid_xy: Optional tuple containing the grid X and Y coordinates to get the forecast for
         :param office: Optional string containing the office to obtain the forecast from.
         :return: Dictionary containing forecast information.
         """
-        return self.get_forecast(gridXY=gridXY, office=office, hourly=True)
+        return self.get_forecast(grid_xy=grid_xy, office=office, hourly=True)
 
     def get_hwo(self, today_only: bool = True) -> list | None:
         """
@@ -405,7 +415,7 @@ class Forecast:
         if self.office is None:
             # If the latitude and longitude tuple is not empty, try to get the point information from the API
             # Otherwise, we need that information to continue
-            if not self.lat_lon:
+            if not all(self.lat_lon):
                 logging.error("No latitude or longitude set. Please set it in the configuration file")
                 return None
 
@@ -418,23 +428,22 @@ class Forecast:
 
         url = HWO_URL.replace("{OFFICE}", self.office)
 
+        start = int(time.time())
         r = requests.get(url)
+        end = int(time.time())
+
+        if verbosity > 3:
+            logging.debug(f"HWO list requests.get() took {end - start} seconds")
+
         r.raise_for_status()
         js = r.json()
 
         # Loop through all the HWO entries to get the ID
         for item in js['@graph']:
-            # Retrieve the actual entry with the @id parameter
-            r = requests.get(item['@id'])
-            r.raise_for_status()
-
-            data = r.json()
-            raw_hwo = data.pop('productText') # Remove the productText so that there are no duplicates
-
             # Parse the time information if we are skipping entries that aren't from today
             if today_only:
                 # Parse the UTC time string
-                utc_dt = datetime.fromisoformat(data['issuanceTime'])
+                utc_dt = datetime.fromisoformat(item['issuanceTime'])
 
                 # Get the local timezone info
                 local_tz = ZoneInfo(TZ)
@@ -447,10 +456,28 @@ class Forecast:
 
                 # Compare to the local time and skip if it is not from today
                 if local_dt.date() != today_local:
-                    logging.debug(f"Skipping product with issuanceTime of {data['issuanceTime']}. Local time is {today_local}")
+                    logging.debug(f"Skipping product with issuanceTime of {item['issuanceTime']}. Local time is {today_local}")
                     continue
 
+            # Retrieve the actual entry with the @id parameter
+            start = int(time.time())
+            r = requests.get(item['@id'])
+            end = int(time.time())
+
+            if verbosity > 3:
+                logging.debug(f"Product HWO requests.get() took {end - start} seconds")
+
+            r.raise_for_status()
+
+            data = r.json()
+            raw_hwo = data.pop('productText') # Remove the productText so that there are no duplicates
+
+            start = int(time.time())
             hwo = hwo_parse(raw_hwo, zone_search=self.zone_id)
+            end = int(time.time())
+
+            if verbosity > 3:
+                logging.debug(f"hwo_parse() took {end - start} seconds")
 
             if hwo:
                 # If the HWO is a list, add the metadata to each entry
@@ -461,7 +488,6 @@ class Forecast:
                 else:
                     hwo['meta'] = data
 
-                logging.debug(f"{self.zone_id}  {len(hwo)}  {item['@id']}  {hwo}")
                 hwo_list.append(hwo)
 
         return hwo_list

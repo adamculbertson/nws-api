@@ -1,4 +1,5 @@
 if __name__ == "__main__":
+    import os
     import sys
     import argparse
     import config
@@ -6,19 +7,28 @@ if __name__ == "__main__":
     from fastapi import FastAPI
     import uvicorn
 
-    from forecast import Forecast
-    from server import APIv1
+    import forecast
+    import server
 
     parser = argparse.ArgumentParser(description="Fetches weather data from the National Weather Service.")
     parser.add_argument("-L", "--logging-level", choices=["debug", "info", "warning", "error", "critical"],
                         help="Set the logging level to the provided value. For the least output, use error or critical")
     parser.add_argument("-l", "--log-file", help="Write logs to the specified file instead of to the console.")
+    parser.add_argument("-v", "--verbose", help="Set the verbosity level of the DEBUG log level",
+                        action="count", default=1)
     parser.add_argument("-c", "--config-file", action="store", default=config.DEFAULT_CONFIG_FILE,
                         help="Use the specified configuration YAML file instead of the default one.")
     parser.add_argument("--no-server", action="store_true", help="Prints the Hazardous Weather Outlook"
                                                                  " for the locations in the config and exits.")
 
     args = parser.parse_args()
+
+    # Get the verbosity level from the command line or the environment (environment takes precedence)
+    verbosity = args.verbose
+    if "VERBOSITY" in os.environ:
+        verbosity = os.environ['VERBOSITY']
+
+    forecast.verbosity = verbosity
 
     # Set the logger to log to the specified file, which indicates that manual logging was specified.
     if args.log_file:
@@ -44,19 +54,20 @@ if __name__ == "__main__":
 
         forecasts = []
         for location in locations:
-            forecast = Forecast(cfg)
-            forecast.get_point((location['lat'], location['lon']))
-            forecast.get_office_info()
-            forecast.load()
+            fc = forecast.Forecast(cfg)
+            fc.get_point((location['lat'], location['lon']))
+            fc.get_office_info()
+            fc.load()
 
-            forecasts.append(forecast.weather)
+            forecasts.append(fc.weather)
 
         import json
         with open("forecast.json", "wt") as f:
             json.dump(forecasts, f)
     else:
+        server.verbosity = verbosity
         app = FastAPI()
-        api = APIv1(app=app, config=cfg)
+        api = server.APIv1(app=app, config=cfg)
 
         address = cfg.get_value("server.address")
         port = cfg.get_value("server.port")

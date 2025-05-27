@@ -1,6 +1,5 @@
 requests
 pyyaml
-beautifulsoup4
 fastapi[standard]
 uvicorn
 pydantic

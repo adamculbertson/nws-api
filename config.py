@@ -11,6 +11,9 @@ DEFAULT_CONFIG_FILE = os.path.expanduser("~/.config/forecast.yml")
 FORMAT: str = "%(levelprefix)s [%(name)s] [%(threadName)s]: %(message)s"  # Logging formatter
 
 DEFAULTS = {
+    "openweathermap": {
+        "api_key": None # OpenWeatherMap API key, for getting coordinates from ZIP codes or city/state names
+    },
     "server": {
         "cache_time": 5, # Time to cache the forecast information, in minutes
         "address": "0.0.0.0",  # IP address / hostname to bind to (all by default)

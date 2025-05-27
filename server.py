@@ -69,6 +69,8 @@ offices_locations = {}
 # Format: zone_ids[office][x][y] = zoneID
 zone_ids = {}
 
+verbosity = 1
+
 # Client payload structure
 # All items are listed as optional, but a pair must be specified
 # For example: latitude and longitude OR city and state
@@ -239,27 +241,27 @@ def get_location_grid(lat_lon: tuple) -> tuple | None:
         return None
 
 
-def refresh_weather(gridXY: tuple, office: str) -> dict | None:
+def refresh_weather(grid_xy: tuple, office: str) -> dict | None:
     """
     Refreshes weather information by calling the appropriate NWS API endpoints.
-    :param gridXY: Tuple containing grid X, Y coordinates that can be obtained from the point API.
+    :param grid_xy: Tuple containing grid X, Y coordinates that can be obtained from the point API.
     :param office: NWS office to obtain data from.
     :return: Dictionary containing the hourly and regular forecasts, hazardous weather outlook, and update timestamp.
     """
-    logging.debug(f"Calling refresh_weather(gridXY: {gridXY}, office: {office})")
+    logging.debug(f"Calling refresh_weather(gridXY: {grid_xy}, office: {office})")
     fc = forecast.Forecast()
-    hourly = fc.get_forecast_hourly(gridXY=gridXY, office=office)
+    hourly = fc.get_forecast_hourly(grid_xy=grid_xy, office=office)
 
     if hourly is None:
         return None
 
-    regular = fc.get_forecast(gridXY=gridXY, office=office)
+    regular = fc.get_forecast(grid_xy=grid_xy, office=office)
 
     if regular is None:
         return None
 
     try:
-        x, y = gridXY
+        x, y = grid_xy
         fc.office = office
         office_info = offices_locations[office]
         fc.office_city = office_info['city']
@@ -273,7 +275,7 @@ def refresh_weather(gridXY: tuple, office: str) -> dict | None:
 
     data = {"hourly": hourly, "forecast": regular, "time": timestamp}
 
-    x, y = gridXY
+    x, y = grid_xy
     weather_info[office][x][y] = data
     return data
 
@@ -292,7 +294,12 @@ def get_hwo(payload_model: Payload, config: Config) -> list | None:
 
     fc = forecast.Forecast()
     fc.lat_lon = (lat, lon)
+    start = int(time.time())
     hwo = fc.get_hwo() # TODO: Cache the HWO results similar to the forecast cache
+    end = int(time.time())
+
+    if verbosity > 3:
+        logging.debug(f"fc.get_hwo() took {end - start} seconds")
 
     if len(hwo) > 0:
         # Check if the newest alert is similar to the ignore text
@@ -308,7 +315,7 @@ def get_hwo(payload_model: Payload, config: Config) -> list | None:
 
         # Ignore the HWO entry
         if ignore_test >= 2:
-            logging.debug(f"Ignoring HWO entry due to {ignore_text} being present")
+            logging.debug(f"Ignoring HWO entry due to '{ignore_text}' being present")
             hwo = []
 
     return hwo
@@ -765,7 +772,14 @@ class APIv1:
 
     def get_hazardous_weather_outlook(self, payload: Payload) -> list | None:
         # /hwo
-        return get_hwo(payload, config=self.config)
+        start = int(time.time())
+        hwo = get_hwo(payload, config=self.config)
+        end = int(time.time())
+
+        if verbosity > 3:
+            logging.debug(f"get_hwo() took {end - start} seconds")
+
+        return hwo
 
     def get_spotter_activation_statement(self, payload: Payload) -> list | None:
         # /spotter
@@ -929,7 +943,8 @@ class APIv1:
                 for same in same_list:
                     # If the current SAME code is not in the list for alerts, skip it
                     if same not in alerts['same']:
-                        logging.debug(f"Skipping SAME code {same} as it is not in the config")
+                        if verbosity > 2:
+                            logging.debug(f"Skipping SAME code {same} as it is not in the config")
                         continue
 
                     entry = alerts['same'][same]
