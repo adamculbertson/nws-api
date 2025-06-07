@@ -485,9 +485,9 @@ class Forecast:
                 if type(hwo) is list:
                     for i in range(len(hwo)):
                         hwo[i]['meta'] = data
+                        hwo_list += hwo
                 else:
                     hwo['meta'] = data
-
-                hwo_list.append(hwo)
+                    hwo_list.append(hwo)
 
         return hwo_list
